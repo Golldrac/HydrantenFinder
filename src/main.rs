@@ -1,25 +1,27 @@
 mod api;
 
-use reqwest;
-use tokio;
-use serde::{Deserialize, Serialize};
-use windows::Devices::Geolocation::{
-    GeolocationAccessStatus, Geolocator, PositionAccuracy,
-    Geoposition, Geocoordinate
-};
-use windows::Foundation::IAsyncOperation;
 use crate::api::Coordinate;
+use reqwest;
+use serde::{Deserialize, Serialize};
+use tokio;
+use tokio::time::{self, Duration};
+use windows::Devices::Geolocation::{
+    Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
+};
+use windows::Foundation::{IAsyncOperation, TimeSpan};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let start_lat = 49.79; // Beispiel: Würzburg
-    let start_lon = 9.93;
+    //let start_lat = 49.79; // Beispiel: Würzburg
+    //let start_lon = 9.93;
+    //let user_location = Coordinate::new(start_lon, start_lat);
+    let user_location = get_user_coordinates().await?;
 
-    //let hydrants = api::find_hydrants(start_lat, start_lon, 1000).await?;
-    //println!("Gefundene Hydranten: {}", hydrants.len());
-    let result = get_user_coordinates().await?;
+    println!("{:?}", user_location);
 
-    println!("{:?}", result);
+    let hydrants = api::get_nearest_hydrants(user_location, Some(3)).await;
+
+    println!("{:?}", hydrants);
 
     Ok(())
 }
@@ -32,9 +34,18 @@ async fn get_user_coordinates() -> Result<Coordinate, Box<dyn std::error::Error>
             println!("✅ Standortzugriff gewährt.");
 
             let geolocator = Geolocator::new()?;
-            geolocator.SetDesiredAccuracy(PositionAccuracy::High)?;
-            let operation: IAsyncOperation<Geoposition> = geolocator.GetGeopositionAsync()?;
-            let geoposition: Geoposition = operation.await?;
+
+            geolocator.SetDesiredAccuracy(PositionAccuracy::Default)?;
+            let max_age_5_minutes = TimeSpan { Duration: 3_000_000_000 };
+            let timeout_5_seconds = TimeSpan { Duration: 50_000_000 };
+
+            let operation: IAsyncOperation<Geoposition> = geolocator
+                .GetGeopositionAsyncWithAgeAndTimeout(
+                    max_age_5_minutes,
+                    timeout_5_seconds
+                )?;
+
+            let geoposition = operation.await?;
             let geocoordinate: Geocoordinate = geoposition.Coordinate()?;
             let latitude = geocoordinate.Latitude()?;
             let longitude = geocoordinate.Longitude()?;
@@ -43,8 +54,9 @@ async fn get_user_coordinates() -> Result<Coordinate, Box<dyn std::error::Error>
                 longitude,
                 latitude,
             };
-
+            println!("📍 Standort erfolgreich abgerufen!");
             Ok(loc)
+
         },
         GeolocationAccessStatus::Denied => {
             Err("❌ Standortzugriff wurde in den Windows-Einstellungen verweigert.".into())
