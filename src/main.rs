@@ -19,9 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{:?}", user_location);
 
-    let hydrants = api::get_nearest_hydrants(user_location, Some(3)).await;
+    let hydrants = api::get_nearest_hydrants(&user_location, Some(3)).await;
 
     println!("{:?}", hydrants);
+
+    let distance = api::get_route_distance(&user_location,&hydrants[0]).await?;
+    println!("Entfernung zum nächsten Hydranten: {} Meter", distance);
 
     Ok(())
 }

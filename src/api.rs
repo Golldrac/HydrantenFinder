@@ -1,6 +1,22 @@
 use geo::{HaversineDistance, Point};
 use serde::{Deserialize, Serialize};
 
+
+#[derive(Debug, Deserialize)]
+pub struct RouteLeg {
+    pub distance: f64, // Entfernung in Metern
+    // pub duration: f64, // Zeit in Sekunden
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Route {
+    pub legs: Vec<RouteLeg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OSRMResponse {
+    pub routes: Vec<Route>,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Coordinate {
     #[serde(rename = "lon")]
@@ -22,7 +38,7 @@ pub struct CoordinateResponse {
     pub elements: Vec<Coordinate>,
 }
 
-pub async fn find_hydrants(location: &Coordinate, radius_m: u32,) -> Result<Vec<Coordinate>, Box<dyn std::error::Error>> {
+pub async fn find_hydrants(location: &Coordinate, radius_m: u32) -> Result<Vec<Coordinate>, Box<dyn std::error::Error>> {
     let lat = location.latitude;
     let lon = location.longitude;
     let query = format!(
@@ -49,10 +65,10 @@ pub async fn find_hydrants(location: &Coordinate, radius_m: u32,) -> Result<Vec<
 
     Ok(response.elements)
 }
-pub async fn get_nearest_hydrants(location: Coordinate, amount: Option<usize>) -> Vec<Coordinate> {
+pub async fn get_nearest_hydrants(location: &Coordinate, amount: Option<usize>) -> Vec<Coordinate> {
     let max_len = amount.unwrap_or(5);
 
-    let coordinates_result = find_hydrants(&location, 500).await;
+    let coordinates_result = find_hydrants(location, 500).await;
 
     let hydrant_locations = match coordinates_result {
         Ok(locs) => locs,
@@ -69,7 +85,6 @@ pub async fn get_nearest_hydrants(location: Coordinate, amount: Option<usize>) -
     println!("hydrant_locations nicht leer");
 
     let user_location_point = Point::new(location.longitude, location.latitude);
-
 
     let mut nearest_hydrants: Vec<(Coordinate, f64)> = hydrant_locations
         .into_iter()
@@ -89,4 +104,30 @@ pub async fn get_nearest_hydrants(location: Coordinate, amount: Option<usize>) -
         .collect();
 
     return final_coords;
+}
+
+pub async fn get_route_distance(start: &Coordinate, destination: &Coordinate) -> Result<f64, Box<dyn std::error::Error>> {
+    let url = format!(
+        "http://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=false",
+        start.longitude, start.latitude, destination.longitude, destination.latitude
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .send()
+        .await?
+        .json::<OSRMResponse>()
+        .await?;
+
+    println!("OSRM Response erhalten: {:?}", response);
+
+    if let Some(route) = response.routes.into_iter().next() {
+        println!("{:?}", route);
+        if let Some(leg) = route.legs.into_iter().next() {
+            return Ok(leg.distance);
+        }
+    }
+
+    Err("Keine Route gefunden oder API-Antwort fehlerhaft".into())
 }
