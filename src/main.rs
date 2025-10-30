@@ -9,18 +9,22 @@ use windows::Devices::Geolocation::{
     Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
 };
 use windows::Foundation::{IAsyncOperation, TimeSpan};
+use dotenvy::dotenv;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let start_lat = 49.79; // Beispiel: Würzburg
     //let start_lon = 9.93;
     //let user_location = Coordinate::new(start_lon, start_lat);
+    dotenv().ok();
     let user_location = get_user_coordinates().await?;
-
     println!("{:?}", user_location);
 
     let hydrants = api::get_nearest_hydrants(&user_location, Some(3)).await;
-
+    if hydrants.is_empty() {
+        println!("Keine Hydranten in der Nähe gefunden. Das Programm wird beendet.");
+        return Ok(());
+    }
     println!("{:?}", hydrants);
 
     let distance = api::get_route_distance(&user_location,&hydrants[0]).await?;
