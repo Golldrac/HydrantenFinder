@@ -1,10 +1,34 @@
 use geo::{HaversineDistance, Point};
+use geo_types::Coordinate as GeoTypesCoordinate;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::error::Error;
 use serde_json;
 use dotenvy;
+use polyline;
 
+
+
+#[derive(Debug, Deserialize)]
+pub struct GeoJsonGeometry {
+    pub coordinates: Vec<Vec<f64>>,
+    #[serde(rename = "type")]
+    pub geo_type: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct RouteLeg {
+    pub distance: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Route {
+    pub legs: Vec<RouteLeg>,
+    pub geometry: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OSRMResponse {
+    pub routes: Vec<Route>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RouteSummary {
@@ -19,22 +43,29 @@ pub struct ORSProperties {
 #[derive(Debug, Deserialize)]
 pub struct ORSFeature {
     pub properties: ORSProperties,
+    pub geometry: GeoJsonGeometry,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ORSResponse {
-    pub features: Vec<ORSFeature>, // Erwartet jetzt "features" statt "routes"
+    pub features: Vec<ORSFeature>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RouteDetails {
+    pub distance_meters: f64,
+    pub geometry_polyline: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Coordinate {
+pub struct Location {
     #[serde(rename = "lon")]
     pub longitude: f64,
     #[serde(rename = "lat")]
     pub latitude: f64,
 }
-impl Coordinate {
+impl Location {
     pub fn new(lon: f64, lat: f64) -> Self {
-        Coordinate {
+        Location {
             longitude: lon,
             latitude: lat,
         }
@@ -42,11 +73,11 @@ impl Coordinate {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CoordinateResponse {
-    pub elements: Vec<Coordinate>,
+pub struct LocationResponse {
+    pub elements: Vec<Location>,
 }
 
-pub async fn find_hydrants(location: &Coordinate, radius_m: u32) -> Result<Vec<Coordinate>, Box<dyn std::error::Error>> {
+pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Location>, Box<dyn std::error::Error>> {
     let lat = location.latitude;
     let lon = location.longitude;
     let query = format!(
@@ -65,26 +96,24 @@ pub async fn find_hydrants(location: &Coordinate, radius_m: u32) -> Result<Vec<C
         .post(url)
         .body(query)
         .send()
-        .await?; // 1. Rohe HTTP-Antwort speichern
+        .await?;
 
-    // NEU: Fehlerbehandlung vor JSON-Parsing
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
 
-        // Overpass gibt oft Klartext-Fehler zurück (z.B. bei Serverauslastung).
         return Err(format!("Overpass API Fehler. Statuscode: {}. Antwort: {}", status, body).into());
     }
 
-    // 2. Wenn der Status erfolgreich ist, versuche zu deserialisieren
-    let response_body = response.json::<CoordinateResponse>()
+    let response_body = response.json::<LocationResponse>()
         .await?;
 
     println!("Alle Hydranten bekommen: {}", response_body.elements.len());
 
     Ok(response_body.elements)
 }
-pub async fn get_nearest_hydrants(location: &Coordinate, amount: Option<usize>) -> Vec<Coordinate> {
+
+pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) -> Vec<Location> {
     let max_len = amount.unwrap_or(5);
 
     let coordinates_result = find_hydrants(location, 500).await;
@@ -105,7 +134,7 @@ pub async fn get_nearest_hydrants(location: &Coordinate, amount: Option<usize>) 
 
     let user_location_point = Point::new(location.longitude, location.latitude);
 
-    let mut nearest_hydrants: Vec<(Coordinate, f64)> = hydrant_locations
+    let mut nearest_hydrants: Vec<(Location, f64)> = hydrant_locations
         .into_iter()
         .map(|hydrant| {
             let hydrant_point = Point::new(hydrant.longitude, hydrant.latitude);
@@ -116,7 +145,7 @@ pub async fn get_nearest_hydrants(location: &Coordinate, amount: Option<usize>) 
 
     nearest_hydrants.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    let final_coords: Vec<Coordinate> = nearest_hydrants
+    let final_coords: Vec<Location> = nearest_hydrants
         .into_iter()
         .take(max_len)
         .map(|(coord, _distance)| coord)
@@ -125,10 +154,38 @@ pub async fn get_nearest_hydrants(location: &Coordinate, amount: Option<usize>) 
     return final_coords;
 }
 
-//TODO: Den weg zurüchgeben und nicht nur die distanz
-//TODO: erst get_route_distance_1, wennn das keine route findet, get_route_distance!!
+pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Result<RouteDetails, Box<dyn std::error::Error>> {
+    let url = format!(
+        "http://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=full",
+        start.longitude, start.latitude, destination.longitude, destination.latitude
+    );
 
-pub async fn get_route_distance(start: &Coordinate, destination: &Coordinate) -> Result<f64, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .send()
+        .await?
+        .json::<OSRMResponse>()
+        .await?;
+
+    println!("OSRM Response erhalten: {:?}", response);
+
+    if let Some(route) = response.routes.into_iter().next() {
+        if let Some(leg) = route.legs.into_iter().next() {
+            if leg.distance == 0.0 {
+                return fetch_route_ors(start, destination).await;
+            }
+            return Ok(RouteDetails {
+                distance_meters: leg.distance,
+                geometry_polyline: route.geometry,
+            });
+        }
+    }
+
+    fetch_route_ors(start, destination).await
+}
+
+pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result<RouteDetails, Box<dyn std::error::Error>> {
 
     let api_key = env::var("ORS_API_KEY").unwrap_or_else(|_| {
         eprintln!("API_KEY nicht gesetzt, verwende Standardwert.");
@@ -149,7 +206,6 @@ pub async fn get_route_distance(start: &Coordinate, destination: &Coordinate) ->
         .send()
         .await?;
 
-    // 1. HTTP-Status prüfen (fängt 4xx/5xx ab)
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
@@ -157,15 +213,12 @@ pub async fn get_route_distance(start: &Coordinate, destination: &Coordinate) ->
         return Err(format!("ORS API Fehler. Statuscode: {}. Antwort: {}", status, body).into());
     }
 
-    // 2. Antwortkörper als Text lesen (konsumiert die Antwort)
     let body_text = response.text().await?;
 
-    // 3. Antwortkörper manuell deserialisieren. Dies fängt den Fehler "missing field routes" ab.
     let response_body: ORSResponse = match serde_json::from_str(&body_text) {
         Ok(body) => body,
         Err(e) => {
-            // Dies ist der entscheidende Teil: Wir geben den Deserialisierungsfehler UND den rohen Body aus
-            return Err(format!("ORS Decode Fehler: {}. Ungültige JSON-Antwort (fehlt 'routes' trotz 200 OK?): {}", e, body_text).into());
+            return Err(format!("ORS Decode Fehler: {}. Ungültige JSON-Antwort: {}", e, body_text).into());
         }
     };
 
@@ -173,53 +226,48 @@ pub async fn get_route_distance(start: &Coordinate, destination: &Coordinate) ->
 
 
     if let Some(feature) = response_body.features.into_iter().next() {
-        // Der Pfad zur Distanz ist jetzt: feature.properties.summary.distance
         let route_distance = feature.properties.summary.distance;
+        let coords = feature.geometry.coordinates;
 
-        // Fallback-Logik für Snapping-Fehler beibehalten
+        let geo_coords: Vec<GeoTypesCoordinate<f64>> = coords.into_iter()
+            .map(|c| {
+                GeoTypesCoordinate { x: c[0], y: c[1] }
+            })
+            .collect();
+
+        let geometry_polyline = polyline::encode_coordinates(geo_coords, 5)?;
+
         if route_distance == 0.0 {
-            // ... (Ihre Fallback-Logik für 0m-Distanz bleibt hier unverändert)
             let start_point = Point::new(start.longitude, start.latitude);
             let dest_point = Point::new(destination.longitude, destination.latitude);
             let haversine_dist = start_point.haversine_distance(&dest_point);
 
             if haversine_dist > 10.0 {
                 eprintln!("⚠️ ORS Route war 0m, aber Luftlinie ist {:.2}m. Wahrscheinlich Snapping-Fehler. Rückgabe Luftlinie.", haversine_dist);
-                return Ok(haversine_dist);
+                return Ok(RouteDetails { distance_meters: haversine_dist, geometry_polyline: "".to_string() });
             }
         }
 
-        return Ok(route_distance);
+        return Ok(RouteDetails {
+            distance_meters: route_distance,
+            geometry_polyline,
+        });
     }
 
-    // Der Fehlertext ist jetzt genauer, falls keine Route gefunden wird
     Err("Keine Route (Feature) in der ORS-Antwort gefunden.".into())
 }
 
-/*
-pub async fn get_route_distance_1(start: &Coordinate, destination: &Coordinate) -> Result<f64, Box<dyn std::error::Error>> {
-    let url = format!(
-        "http://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=false",
-        start.longitude, start.latitude, destination.longitude, destination.latitude
-    );
+pub fn decode_route_polyline(polyline_str: &str, precision: u32) -> Result<Vec<Location>, String> {
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .send()
-        .await?
-        .json::<OSRMResponse>()
-        .await?;
+    let decoded_coords = polyline::decode_polyline(polyline_str, precision)
+        .map_err(|e| format!("Fehler beim Dekodieren der Polyline: {:?}", e))?;
 
-    println!("OSRM Response erhalten: {:?}", response);
+    let locations: Vec<Location> = decoded_coords.into_iter()
+        .map(|coord| Location {
+            longitude: coord.x,
+            latitude: coord.y,
+        })
+        .collect();
 
-    if let Some(route) = response.routes.into_iter().next() {
-        println!("{:?}", route);
-        if let Some(leg) = route.legs.into_iter().next() {
-            return Ok(leg.distance);
-        }
-    }
-
-    Err("Keine Route gefunden oder API-Antwort fehlerhaft".into())
+    Ok(locations)
 }
- */

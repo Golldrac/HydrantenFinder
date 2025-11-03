@@ -1,10 +1,8 @@
 mod api;
 
-use crate::api::Coordinate;
-use reqwest;
-use serde::{Deserialize, Serialize};
+use crate::api::Location;
+use crate::api::RouteDetails;
 use tokio;
-use tokio::time::{self, Duration};
 use windows::Devices::Geolocation::{
     Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
 };
@@ -27,13 +25,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("{:?}", hydrants);
 
-    let distance = api::get_route_distance(&user_location,&hydrants[0]).await?;
-    println!("Entfernung zum nächsten Hydranten: {} Meter", distance);
+
+    let route_details: RouteDetails = api::fetch_route_osrm(&user_location, &hydrants[0]).await?;
+    println!("Entfernung zum nächsten Hydranten: {} Meter", route_details.distance_meters);
+    println!("Routen-Geometrie (Polyline): {}", route_details.geometry_polyline);
+    match api::decode_route_polyline(&route_details.geometry_polyline, 5) {
+        Ok(route_path) => {
+            println!("\n✅ Routenpfad erfolgreich dekodiert ({} Punkte):", route_path.len());
+            let display_count = route_path.len().min(3);
+            for (i, loc) in route_path.iter().take(display_count).enumerate() {
+                println!("  Startpunkt {}/{} (Lon: {:.6}, Lat: {:.6})", i+1, route_path.len(), loc.longitude, loc.latitude);
+            }
+
+            if route_path.len() > 6 {
+                println!("  ...");
+            }
+
+            for (i, loc) in route_path.iter().skip(route_path.len().saturating_sub(display_count)).enumerate() {
+                println!("  Endpunkt {}/{} (Lon: {:.6}, Lat: {:.6})", route_path.len() - display_count + i + 1, route_path.len(), loc.longitude, loc.latitude);
+            }
+
+        },
+        Err(e) => {
+            eprintln!("\n❌ Fehler beim Dekodieren der Polyline: {}", e);
+        }
+    }
 
     Ok(())
 }
 
-async fn get_user_coordinates() -> Result<Coordinate, Box<dyn std::error::Error>> {
+async fn get_user_coordinates() -> Result<Location, Box<dyn std::error::Error>> {
     let access_status = Geolocator::RequestAccessAsync()?.await?;
 
     match access_status {
@@ -57,7 +78,7 @@ async fn get_user_coordinates() -> Result<Coordinate, Box<dyn std::error::Error>
             let latitude = geocoordinate.Latitude()?;
             let longitude = geocoordinate.Longitude()?;
 
-            let loc = Coordinate {
+            let loc = Location {
                 longitude,
                 latitude,
             };
