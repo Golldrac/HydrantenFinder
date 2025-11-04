@@ -1,83 +1,18 @@
+
+
 use geo::{HaversineDistance, Point};
 use geo_types::Coordinate as GeoTypesCoordinate;
-use serde::{Deserialize, Serialize};
 use std::env;
 use serde_json;
-use dotenvy;
 use polyline;
+use futures::future::join_all;
+use anyhow::Result;
+use crate::models::{Location, LocationResponse, OSRMResponse, ORSResponse, RouteDetails, RankedHydrant};
+use crate::POLYLINE_PRECISION;
 
 
 
-#[derive(Debug, Deserialize)]
-pub struct GeoJsonGeometry {
-    pub coordinates: Vec<Vec<f64>>,
-    #[serde(rename = "type")]
-    pub geo_type: String,
-}
-#[derive(Debug, Deserialize)]
-pub struct RouteLeg {
-    pub distance: f64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Route {
-    pub legs: Vec<RouteLeg>,
-    pub geometry: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OSRMResponse {
-    pub routes: Vec<Route>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RouteSummary {
-    pub distance: f64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ORSProperties {
-    pub summary: RouteSummary,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ORSFeature {
-    pub properties: ORSProperties,
-    pub geometry: GeoJsonGeometry,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ORSResponse {
-    pub features: Vec<ORSFeature>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RouteDetails {
-    pub distance_meters: f64,
-    pub geometry_polyline: String,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Location {
-    #[serde(rename = "lon")]
-    pub longitude: f64,
-    #[serde(rename = "lat")]
-    pub latitude: f64,
-}
-impl Location {
-    pub fn new(lon: f64, lat: f64) -> Self {
-        Location {
-            longitude: lon,
-            latitude: lat,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LocationResponse {
-    pub elements: Vec<Location>,
-}
-
-pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Location>, Box<dyn std::error::Error>> {
+pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Location>> {
     let lat = location.latitude;
     let lon = location.longitude;
     let query = format!(
@@ -101,8 +36,7 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-
-        return Err(format!("Overpass API Fehler. Statuscode: {}. Antwort: {}", status, body).into());
+        anyhow::bail!("Overpass API Fehler. Statuscode: {}. Antwort: {}", status, body);
     }
 
     let response_body = response.json::<LocationResponse>()
@@ -113,7 +47,7 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
     Ok(response_body.elements)
 }
 
-pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) -> Vec<Location> {
+pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) -> Result<Vec<Location>> {
     let max_len = amount.unwrap_or(5);
 
     let coordinates_result = find_hydrants(location, 500).await;
@@ -121,13 +55,12 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
     let hydrant_locations = match coordinates_result {
         Ok(locs) => locs,
         Err(e) => {
-            eprintln!("Fehler beim Abruf der Hydranten: {}", e);
-            return Vec::new();
+            anyhow::bail!("Fehler beim Abruf der Hydranten: {}", e);
         }
     };
 
     if hydrant_locations.is_empty() {
-        return Vec::new();
+        anyhow::bail!("Keine Hydranten in der Nähe gefunden" );
     }
 
     println!("hydrant_locations nicht leer");
@@ -151,10 +84,10 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
         .map(|(coord, _distance)| coord)
         .collect();
 
-    return final_coords;
+    return Ok(final_coords);
 }
 
-pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Result<RouteDetails, Box<dyn std::error::Error>> {
+pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Result<RouteDetails,> {
     let url = format!(
         "http://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=full",
         start.longitude, start.latitude, destination.longitude, destination.latitude
@@ -185,7 +118,7 @@ pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Resul
     fetch_route_ors(start, destination).await
 }
 
-pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result<RouteDetails, Box<dyn std::error::Error>> {
+pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result<RouteDetails> {
 
     let api_key = env::var("ORS_API_KEY").unwrap_or_else(|_| {
         eprintln!("API_KEY nicht gesetzt, verwende Standardwert.");
@@ -209,8 +142,7 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-
-        return Err(format!("ORS API Fehler. Statuscode: {}. Antwort: {}", status, body).into());
+        anyhow::bail!("Overpass API Fehler. Statuscode: {}. Antwort: {}", status, body);
     }
 
     let body_text = response.text().await?;
@@ -218,7 +150,7 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
     let response_body: ORSResponse = match serde_json::from_str(&body_text) {
         Ok(body) => body,
         Err(e) => {
-            return Err(format!("ORS Decode Fehler: {}. Ungültige JSON-Antwort: {}", e, body_text).into());
+            anyhow::bail!("ORS Decode Fehler: {}. Ungültige JSON-Antwort: {}", e, body_text);
         }
     };
 
@@ -235,7 +167,7 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
             })
             .collect();
 
-        let geometry_polyline = polyline::encode_coordinates(geo_coords, 5)?;
+        let geometry_polyline = polyline::encode_coordinates(geo_coords, POLYLINE_PRECISION)?;
 
         if route_distance == 0.0 {
             let start_point = Point::new(start.longitude, start.latitude);
@@ -254,7 +186,49 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
         });
     }
 
-    Err("Keine Route (Feature) in der ORS-Antwort gefunden.".into())
+    anyhow::bail!("Keine Route (Feature) in der ORS-Antwort gefunden.");
+
+}
+
+pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: &Vec<Location>) -> Result<RankedHydrant> {
+
+    if candidate_hydrants.is_empty() {
+        anyhow::bail!("Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
+    }
+
+    println!("\nStarte Routenberechnung für {} Hydranten-Kandidaten (parallel)...", candidate_hydrants.len());
+
+    let route_futures: Vec<_> = candidate_hydrants
+        .iter()
+        .map(|hydrant_location| {
+            async move {
+                let route_result = fetch_route_osrm(user_location, &hydrant_location).await;
+
+                match route_result {
+                    Ok(details) => Ok(RankedHydrant {
+                        location: Location::new(hydrant_location.longitude, hydrant_location.latitude),
+                        route_details: details,
+                    }),
+                    Err(e) => Err(format!("Fehler beim Routing zu ({}, {}): {}",
+                                          hydrant_location.latitude, hydrant_location.longitude, e)),
+                }
+            }
+        })
+        .collect();
+
+    let results: Vec<Result<RankedHydrant, String>> = join_all(route_futures).await;
+
+    let best_hydrant = results.into_iter()
+        .filter_map(Result::ok)
+        .filter(|h| h.route_details.distance_meters > 0.0)
+        .min_by_key(|h| {
+            (h.route_details.distance_meters * 100.0) as i64
+        });
+
+    match best_hydrant {
+        Some(h) => Ok(h),
+        None => anyhow::bail!("Keine gültige Route unter den Kandidaten gefunden."),
+    }
 }
 
 pub fn decode_route_polyline(polyline_str: &str, precision: u32) -> Result<Vec<Location>, String> {
