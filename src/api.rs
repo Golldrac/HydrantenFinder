@@ -1,16 +1,22 @@
+mod utils;
 
-
+use std::f64::consts::PI;
+use anyhow::{Context, Result};
+use futures::future::join_all;
 use geo::{HaversineDistance, Point};
 use geo_types::Coordinate as GeoTypesCoordinate;
-use std::env;
-use serde_json;
 use polyline;
-use futures::future::join_all;
-use anyhow::Result;
-use crate::models::{Location, LocationResponse, OSRMResponse, ORSResponse, RouteDetails, RankedHydrant};
+use serde_json;
+use std::env;
+
 use crate::POLYLINE_PRECISION;
+use crate::models::{
+    Location, LocationResponse, ORSResponse, OSRMResponse, RankedHydrant, RouteDetails, MapRequest, MapMarker, MapLine,
+};
 
-
+const PROXIMITY_THRESHOLD_METERS: f64 = 5.0;
+const MAP_WIDTH_PIXELS: f64 = 800.0;
+const MAX_ZOOM: u32 = 18;
 
 pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Location>> {
     let lat = location.latitude;
@@ -27,27 +33,29 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
     let url = "http://overpass-api.de/api/interpreter";
 
     let client = reqwest::Client::new();
-    let response = client
-        .post(url)
-        .body(query)
-        .send()
-        .await?;
+    let response = client.post(url).body(query).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-        anyhow::bail!("Overpass API Fehler. Statuscode: {}. Antwort: {}", status, body);
+        let body = response
+            .text()
+            .await
+            .context("Kein Antwort-Body verfügbar")?;
+        anyhow::bail!(
+            "Overpass API Fehler. Statuscode: {}. Antwort: {}",
+            status,
+            body
+        );
     }
 
-    let response_body = response.json::<LocationResponse>()
-        .await?;
+    let response_body = response.json::<LocationResponse>().await?;
 
     println!("Alle Hydranten bekommen: {}", response_body.elements.len());
 
     Ok(response_body.elements)
 }
 
-pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) -> Result<Vec<Location>> {
+pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>,) -> Result<Vec<Location>> {
     let max_len = amount.unwrap_or(5);
 
     let coordinates_result = find_hydrants(location, 500).await;
@@ -60,7 +68,7 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
     };
 
     if hydrant_locations.is_empty() {
-        anyhow::bail!("Keine Hydranten in der Nähe gefunden" );
+        anyhow::bail!("Keine Hydranten in der Nähe gefunden");
     }
 
     println!("hydrant_locations nicht leer");
@@ -87,7 +95,7 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
     return Ok(final_coords);
 }
 
-pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Result<RouteDetails,> {
+pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Result<RouteDetails> {
     let url = format!(
         "http://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=full",
         start.longitude, start.latitude, destination.longitude, destination.latitude
@@ -100,8 +108,6 @@ pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Resul
         .await?
         .json::<OSRMResponse>()
         .await?;
-
-    println!("OSRM Response erhalten: {:?}", response);
 
     if let Some(route) = response.routes.into_iter().next() {
         if let Some(leg) = route.legs.into_iter().next() {
@@ -119,30 +125,26 @@ pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Resul
 }
 
 pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result<RouteDetails> {
-
-    let api_key = env::var("ORS_API_KEY").unwrap_or_else(|_| {
-        eprintln!("API_KEY nicht gesetzt, verwende Standardwert.");
-        "default_key".to_string()
-    });
+    //Wenn keine Abfragen mehr übrig sind, neuer Account mit neuem Key erstellen
+    let api_key =
+        env::var("ORS_API_KEY").context("ORS_API_KEY Umgebungsvariable muss gesetzt sein.")?;
 
     let url = format!(
         "https://api.openrouteservice.org/v2/directions/foot-walking?api_key={}&start={},{}&end={},{}&snapping=any",
-        api_key,
-        start.longitude, start.latitude,
-        destination.longitude, destination.latitude
+        api_key, start.longitude, start.latitude, destination.longitude, destination.latitude
     );
 
     let client = reqwest::Client::new();
 
-    let response = client
-        .get(&url)
-        .send()
-        .await?;
+    let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-        anyhow::bail!("Overpass API Fehler. Statuscode: {}. Antwort: {}", status, body);
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
+        anyhow::bail!("ORS API Fehler. Statuscode: {}. Antwort: {}", status, body);
     }
 
     let body_text = response.text().await?;
@@ -150,21 +152,21 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
     let response_body: ORSResponse = match serde_json::from_str(&body_text) {
         Ok(body) => body,
         Err(e) => {
-            anyhow::bail!("ORS Decode Fehler: {}. Ungültige JSON-Antwort: {}", e, body_text);
+            anyhow::bail!(
+                "ORS Decode Fehler: {}. Ungültige JSON-Antwort: {}",
+                e,
+                body_text
+            );
         }
     };
-
-    println!("ORS Response erhalten: {:?}", response_body);
-
 
     if let Some(feature) = response_body.features.into_iter().next() {
         let route_distance = feature.properties.summary.distance;
         let coords = feature.geometry.coordinates;
 
-        let geo_coords: Vec<GeoTypesCoordinate<f64>> = coords.into_iter()
-            .map(|c| {
-                GeoTypesCoordinate { x: c[0], y: c[1] }
-            })
+        let geo_coords: Vec<GeoTypesCoordinate<f64>> = coords
+            .into_iter()
+            .map(|c| GeoTypesCoordinate { x: c[0], y: c[1] })
             .collect();
 
         let geometry_polyline = polyline::encode_coordinates(geo_coords, POLYLINE_PRECISION)?;
@@ -175,8 +177,14 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
             let haversine_dist = start_point.haversine_distance(&dest_point);
 
             if haversine_dist > 10.0 {
-                eprintln!("⚠️ ORS Route war 0m, aber Luftlinie ist {:.2}m. Wahrscheinlich Snapping-Fehler. Rückgabe Luftlinie.", haversine_dist);
-                return Ok(RouteDetails { distance_meters: haversine_dist, geometry_polyline: "".to_string() });
+                eprintln!(
+                    "⚠️ ORS Route war 0m, aber Luftlinie ist {:.2}m. Wahrscheinlich Snapping-Fehler. Rückgabe Luftlinie.",
+                    haversine_dist
+                );
+                return Ok(RouteDetails {
+                    distance_meters: haversine_dist,
+                    geometry_polyline: "".to_string(),
+                });
             }
         }
 
@@ -187,43 +195,56 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
     }
 
     anyhow::bail!("Keine Route (Feature) in der ORS-Antwort gefunden.");
-
 }
 
-pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: &Vec<Location>) -> Result<RankedHydrant> {
-
+pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: &Vec<Location>,) -> Result<RankedHydrant> {
     if candidate_hydrants.is_empty() {
         anyhow::bail!("Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
     }
 
-    println!("\nStarte Routenberechnung für {} Hydranten-Kandidaten (parallel)...", candidate_hydrants.len());
+    let user_location_point = Point::new(user_location.longitude, user_location.latitude);
+    let first_hydrant_location = &candidate_hydrants[0];
+
+    let hydrant_point = Point::new(
+        first_hydrant_location.longitude,
+        first_hydrant_location.latitude,
+    );
+    let haversine_dist = user_location_point.haversine_distance(&hydrant_point);
+
+    if haversine_dist <= PROXIMITY_THRESHOLD_METERS {
+        return Ok(RankedHydrant {
+            location: first_hydrant_location.clone(),
+            route_details: RouteDetails {
+                distance_meters: haversine_dist,
+                geometry_polyline: String::new(),
+            },
+        });
+    }
 
     let route_futures: Vec<_> = candidate_hydrants
         .iter()
-        .map(|hydrant_location| {
-            async move {
-                let route_result = fetch_route_osrm(user_location, &hydrant_location).await;
+        .map(|hydrant_location| async move {
+            let route_result = fetch_route_osrm(user_location, &hydrant_location).await;
 
-                match route_result {
-                    Ok(details) => Ok(RankedHydrant {
-                        location: Location::new(hydrant_location.longitude, hydrant_location.latitude),
-                        route_details: details,
-                    }),
-                    Err(e) => Err(format!("Fehler beim Routing zu ({}, {}): {}",
-                                          hydrant_location.latitude, hydrant_location.longitude, e)),
-                }
+            match route_result {
+                Ok(details) => Ok(RankedHydrant {
+                    location: Location::new(hydrant_location.longitude, hydrant_location.latitude),
+                    route_details: details,
+                }),
+                Err(e) => Err(format!(
+                    "Fehler beim Routing zu ({}, {}): {}",
+                    hydrant_location.latitude, hydrant_location.longitude, e
+                )),
             }
         })
         .collect();
 
     let results: Vec<Result<RankedHydrant, String>> = join_all(route_futures).await;
 
-    let best_hydrant = results.into_iter()
+    let best_hydrant = results
+        .into_iter()
         .filter_map(Result::ok)
-        .filter(|h| h.route_details.distance_meters > 0.0)
-        .min_by_key(|h| {
-            (h.route_details.distance_meters * 100.0) as i64
-        });
+        .min_by_key(|h| (h.route_details.distance_meters * 100.0) as i64);
 
     match best_hydrant {
         Some(h) => Ok(h),
@@ -231,17 +252,96 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
     }
 }
 
-pub fn decode_route_polyline(polyline_str: &str, precision: u32) -> Result<Vec<Location>, String> {
+pub async fn get_map_post(user: &Location, hydrant: &RankedHydrant, width: u32, height: u32,) -> Result<Vec<u8>> {
+    let api_key = env::var("STADIAMAPS_API_KEY")
+        .context("STADIAMAPS_API_KEY Umgebungsvariable muss gesetzt sein.")?;
 
-    let decoded_coords = polyline::decode_polyline(polyline_str, precision)
-        .map_err(|e| format!("Fehler beim Dekodieren der Polyline: {:?}", e))?;
+    ////Wenn keine Abfragen mehr übrig sind, neuer Account mit neuem Key erstellen
 
-    let locations: Vec<Location> = decoded_coords.into_iter()
-        .map(|coord| Location {
-            longitude: coord.x,
-            latitude: coord.y,
-        })
-        .collect();
+    let hydrant_loc = &hydrant.location;
+    let polyline_param = &hydrant.route_details.geometry_polyline;
+    let zoom = calculate_zoom_level(user, hydrant_loc);
 
-    Ok(locations)
+
+    let request_body = MapRequest {
+        center: format!(
+            "{},{}",
+            (user.latitude + hydrant_loc.latitude) / 2f64,
+            (user.longitude + hydrant_loc.longitude) / 2f64,
+        ),
+        size: format!("{}x{}@2x", width, height),
+        zoom,
+        markers: vec![
+            MapMarker {
+                lat: user.latitude,
+                lon: user.longitude,
+                color: Some("red".to_string()),
+                label: None,
+            },
+            MapMarker {
+                lat: hydrant_loc.latitude,
+                lon: hydrant_loc.longitude,
+                color: Some("blue".to_string()),
+                label: Some("H".to_string()),
+            },
+        ],
+        lines: if polyline_param.is_empty() {
+            vec![]
+        } else {
+            vec![
+                MapLine {
+                    shape: polyline_param.clone(),
+                    stroke_color: Some("red".to_string()),
+                    stroke_width: Some(5),
+                }
+            ]
+        },
+    };
+
+    let url = format!(
+        "https://tiles.stadiamaps.com/static_cacheable/alidade_smooth.png?api_key={}",
+        api_key
+    );
+
+
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&request_body)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("Kein Antwort-Body verfügbar")?;
+        anyhow::bail!(
+            "Stadia Maps API (POST) Fehler. Statuscode: {}. Antwort: {}",
+            status,
+            body
+        );
+    }
+
+    Ok(response.bytes().await?.to_vec())
+}
+pub fn calculate_zoom_level(loc1: &Location, loc2: &Location) -> u32 {
+    let mid_lat_rad = (loc1.latitude.to_radians() + loc2.latitude.to_radians()) / 2.0;
+    let max_lon_dist = (loc1.longitude - loc2.longitude).abs();
+
+    let meters_per_lon_degree = 6371000.0 * 2.0 * PI * mid_lat_rad.cos() / 360.0;
+    let horizontal_distance_m = max_lon_dist * meters_per_lon_degree;
+    if horizontal_distance_m == 0.0 {
+        return MAX_ZOOM;
+    }
+
+    let zoom_factor = 450.0;
+    let zoom_f64 = MAP_WIDTH_PIXELS.log2() + (zoom_factor / horizontal_distance_m).log2();
+
+    let final_zoom = zoom_f64.floor() as u32;
+
+    final_zoom.clamp(0, MAX_ZOOM)
 }
