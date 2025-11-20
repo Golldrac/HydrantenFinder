@@ -11,3 +11,6 @@ Thumbs.db
 
 # Environment variables (MUST NOT be committed)
 .env
+
+#Pictures
+.png
