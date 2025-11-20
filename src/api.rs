@@ -1,5 +1,3 @@
-mod utils;
-
 use std::f64::consts::PI;
 use anyhow::{Context, Result};
 use futures::future::join_all;
