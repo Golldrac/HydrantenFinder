@@ -1,13 +1,15 @@
 use std::f64::consts::PI;
 use std::env;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use futures::future::join_all;
 use geo::{Haversine, HaversineDistance, Point};
 use geo_types::Coord;
+use indicatif::{ProgressBar, ProgressStyle};
 use polyline;
 use reqwest;
 use serde_json;
+use tokio::time::sleep;
 
 use crate::models::{
     Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse,
@@ -81,7 +83,7 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
 /// # Arguments
 ///
 /// * `location` - Die Startposition des Benutzers.
-/// * `amount` - Die maximale Anzahl der zurückzugebenden Hydranten.
+/// * `amount` - Die maximale Anzahl der zurückzugebenden Hydranten (Standard: 5).
 ///
 /// # Returns
 ///
@@ -124,54 +126,45 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
 
 /// Berechnet die Route zwischen Start und Ziel mithilfe der OSRM (Open Source Routing Machine) API.
 ///
-/// **NEU:** Fällt nun auch bei Netzwerkfehlern oder HTTP-Fehler-Statuscodes auf `fetch_route_ors` zurück.
+/// **Wichtig:** Bei Netzwerkfehlern, HTTP-Fehler-Statuscodes oder ungültiger/0m Route
+/// wird automatisch auf `fetch_route_ors` zurückgefallen.
 ///
 /// # Arguments
 ///
+/// * `client` - Ein geteilter reqwest Client.
 /// * `start` - Die Startposition.
 /// * `destination` - Die Zielposition.
 ///
 /// # Returns
 ///
 /// Die `RouteDetails` der berechneten Route.
-pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Result<RouteDetails> {
+pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destination: &Location) -> Result<RouteDetails> {
     let url = format!(
         "https://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=full",
         start.longitude, start.latitude, destination.longitude, destination.latitude
     );
 
-    let client = reqwest::Client::new();
 
-    // Sende die Anfrage und fange sofortige Netzwerkfehler ab.
     let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("⚠️ OSRM Network Error: {}. Falling back to ORS.", e);
-            return fetch_route_ors(start, destination).await;
+            eprintln!("⚠️ OSRM Network Error: {}. Versuche ORS...", e);
+            return fetch_route_ors(client, start, destination).await;
         }
     };
 
-    // Fange HTTP-Statusfehler (z.B. 400 Bad Request oder 5xx Serverfehler) ab.
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-        eprintln!(
-            "⚠️ OSRM API Error (Status: {}). Antwort: {}. Falling back to ORS.",
-            status,
-            &body[..body.len().min(100)]
-        );
-        return fetch_route_ors(start, destination).await;
+        eprintln!("⚠️ OSRM Status Error: {}. Versuche ORS...", response.status());
+        return fetch_route_ors(client, start, destination).await;
     }
 
     let response_body = response.json::<OSRMResponse>().await?;
 
-
+    // Prüft, ob eine gültige Route vorhanden ist, ansonsten Fallback
     if let Some(route) = response_body.routes.into_iter().next() {
         if let Some(leg) = route.legs.into_iter().next() {
             if leg.distance == 0.0 {
-                // Fallback, wenn OSRM 0m zurückgibt (z.B. bei Snapping-Problemen).
-                eprintln!("⚠️ OSRM returned 0m distance. Falling back to ORS.");
-                return fetch_route_ors(start, destination).await;
+                return fetch_route_ors(client, start, destination).await;
             }
             return Ok(RouteDetails {
                 distance_meters: leg.distance,
@@ -180,17 +173,18 @@ pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Resul
         }
     }
 
-    eprintln!("⚠️ OSRM found no route or segment. Falling back to ORS.");
-    // Fallback, wenn keine Route oder kein Segment gefunden wurde.
-    fetch_route_ors(start, destination).await
+    // Fallback, wenn keine Route im Body gefunden wurde
+    fetch_route_ors(client, start, destination).await
 }
 
 /// Berechnet die Route zwischen Start und Ziel mithilfe der OpenRouteService (ORS) API.
 ///
-/// ORS wird als Fallback für OSRM verwendet und erfordert einen API-Schlüssel.
+/// ORS dient als Fallback für OSRM und **erfordert einen API-Schlüssel** (`ORS_API_KEY`).
+/// Meldet ORS eine 0m-Route, wird die Haversine-Distanz zurückgegeben, falls diese > 10m ist.
 ///
 /// # Arguments
 ///
+/// * `client` - Ein geteilter reqwest Client.
 /// * `start` - Die Startposition.
 /// * `destination` - Die Zielposition.
 ///
@@ -198,7 +192,7 @@ pub async fn fetch_route_osrm(start: &Location, destination: &Location) -> Resul
 ///
 /// Gibt einen Fehler zurück, wenn die `ORS_API_KEY` Umgebungsvariable fehlt oder
 /// die API einen Fehlerstatus zurückgibt.
-pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result<RouteDetails> {
+pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destination: &Location) -> Result<RouteDetails> {
     let api_key =
         env::var("ORS_API_KEY").context("❌ ORS_API_KEY Umgebungsvariable muss gesetzt sein. Routing nicht möglich.")?;
 
@@ -207,7 +201,6 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
         api_key, start.longitude, start.latitude, destination.longitude, destination.latitude
     );
 
-    let client = reqwest::Client::new();
     let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
@@ -256,7 +249,7 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
                 );
                 return Ok(RouteDetails {
                     distance_meters: haversine_dist,
-                    geometry_polyline: String::new(), // Keine Polyline für Luftlinie
+                    geometry_polyline: String::new(), // Keine Polyline für Luftlinie bei Fallback
                 });
             }
         }
@@ -271,16 +264,24 @@ pub async fn fetch_route_ors(start: &Location, destination: &Location) -> Result
 }
 
 /// Ermittelt den nächstgelegenen Hydranten unter den Kandidaten,
-/// basierend auf der berechneten Geh-Route (fetch_route_osrm/ors).
+/// basierend auf der berechneten Geh-Route (unter Verwendung von `fetch_route_osrm` mit ORS-Fallback).
+///
+/// **Optimierung:** Wenn der Hydrant, der per Luftlinie am nächsten liegt,
+/// bereits innerhalb des `PROXIMITY_THRESHOLD_METERS` liegt, wird sofort diese Position
+/// ohne Routenberechnung zurückgegeben.
 ///
 /// # Arguments
 ///
 /// * `user_location` - Die Startposition des Benutzers.
-/// * `candidate_hydrants` - Eine Liste von Hydranten, die in Betracht gezogen werden sollen.
+/// * `candidate_hydrants` - Eine Liste von Hydranten, die in Betracht gezogen werden sollen (typischerweise die nach Luftlinie nächsten).
 ///
 /// # Returns
 ///
 /// Die `RankedHydrant` mit der kürzesten Geh-Distanz.
+///
+/// # Errors
+///
+/// Gibt einen Fehler zurück, wenn keine gültige Route zu einem der Hydranten gefunden werden konnte.
 pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: &[Location]) -> Result<RankedHydrant> {
     if candidate_hydrants.is_empty() {
         anyhow::bail!("🗺️ Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
@@ -306,48 +307,56 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
             },
         });
     }
+    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap();
 
-    // Parallel Routing
-    let route_futures: Vec<_> = candidate_hydrants
-        .iter()
-        .map(|hydrant_location| async move {
-            let route_result = fetch_route_osrm(user_location, hydrant_location).await;
 
-            match route_result {
-                Ok(details) => Ok(RankedHydrant {
-                    location: hydrant_location.clone(),
+    // Erstellen Sie den Spinner
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(spinner_style);
+    pb.set_message(
+        "🧭 Berechne Routen zum nächstgelegenen Hydranten..."
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let client = reqwest::Client::builder()
+        .user_agent("HydrantenFinder/1.0")
+        .build()?;
+
+    let mut best_hydrant: Option<RankedHydrant> = None;
+
+    for hydrant in candidate_hydrants {
+        match fetch_route_osrm(&client, user_location, hydrant).await {
+            Ok(details) => {
+                let candidate = RankedHydrant {
+                    location: hydrant.clone(),
                     route_details: details,
-                }),
-                // Fehler auf String mappen für join_all
-                Err(e) => Err(format!(
-                    "Routing-Fehler zu Hydrant: {}",
-                    e
-                )),
+                };
+
+                // Ist dieser Hydrant näher als der bisher beste?
+                match best_hydrant {
+                    None => best_hydrant = Some(candidate),
+                    Some(ref current_best) => {
+                        if candidate.route_details.distance_meters < current_best.route_details.distance_meters {
+                            best_hydrant = Some(candidate);
+                        }
+                    }
+                }
             }
-        })
-        .collect();
+            Err(e) => {
+                // Fehler loggen, aber nicht abbrechen
+                pb.println(format!("⚠️ Fehler bei Route: {}", e));
+            }
+        }
 
-    let results: Vec<Result<RankedHydrant, String>> = join_all(route_futures).await;
+        pb.inc(1);
 
-    let errors: Vec<&String> = results.iter()
-        .filter_map(|r| r.as_ref().err())
-        .collect();
-
-    for error in errors {
-        eprintln!("⚠️ Routing-Fehler bei Kandidat: {}", error);
+        // WICHTIG: Eine kleine Pause einlegen, um den Server nicht zu überlasten.
+        sleep(Duration::from_millis(200)).await;
     }
 
-    // Wir filtern nur erfolgreiche Routen heraus und wählen die kürzeste.
-    let best_hydrant = results
-        .into_iter()
-        .filter_map(Result::ok)
-        .min_by_key(|h| (h.route_details.distance_meters * 100.0) as i64);
-    // Skalierung ist ein schneller Workaround für Fließkommavergleiche
+    pb.finish();
 
-    match best_hydrant {
-        Some(h) => Ok(h),
-        None => anyhow::bail!("🗺️ Keine gültige Route unter den Kandidaten gefunden."),
-    }
+    best_hydrant.ok_or_else(|| anyhow::anyhow!("Keine gültige Route gefunden."))
 }
 
 /// Ruft eine statische Karte von der Stadia Maps API ab, die die Route anzeigt.
