@@ -42,10 +42,7 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
             let geoposition = operation.await?;
             let geocoordinate: Geocoordinate = geoposition.Coordinate()?;
 
-            let loc = Location {
-                longitude: geocoordinate.Longitude()?,
-                latitude: geocoordinate.Latitude()?,
-            };
+            let loc = Location::new(geocoordinate.Longitude()?, geocoordinate.Latitude()?);
 
             Ok(loc)
         },
