@@ -11,10 +11,7 @@ use reqwest;
 use serde_json;
 use tokio::time::sleep;
 
-use crate::models::{
-    Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse,
-    RankedHydrant, RouteDetails,
-};
+use crate::models::{HydrantTags, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse, RankedHydrant, RouteDetails};
 
 /// Die Genauigkeit, mit der Polylines kodiert werden sollen.
 const POLYLINE_PRECISION: u32 = 6;
@@ -48,7 +45,7 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
         (
           node(around:{}, {}, {})[emergency=fire_hydrant];
         );
-        out center;"#,
+        out tags center;"#,
         radius_m, lat, lon
     );
 
@@ -70,7 +67,7 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
         );
     }
 
-    let response_body = response.json::<LocationResponse>().await?;
+   let response_body = response.json::<LocationResponse>().await?;
 
     Ok(response_body.elements)
 }
@@ -148,13 +145,13 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
     let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("⚠️ OSRM Network Error: {}. Versuche ORS...", e);
+            eprintln!("🌐 OSRM-Netzwerkfehler: {}. Versuche ORS...", e);
             return fetch_route_ors(client, start, destination).await;
         }
     };
 
     if !response.status().is_success() {
-        eprintln!("⚠️ OSRM Status Error: {}. Versuche ORS...", response.status());
+        eprintln!("🚦 OSRM-Statusfehler: {}. Versuche ORS...", response.status());
         return fetch_route_ors(client, start, destination).await;
     }
 
@@ -179,8 +176,9 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
 
 /// Berechnet die Route zwischen Start und Ziel mithilfe der OpenRouteService (ORS) API.
 ///
-/// ORS dient als Fallback für OSRM und **erfordert einen API-Schlüssel** (`ORS_API_KEY`).
-/// Meldet ORS eine 0m-Route, wird die Haversine-Distanz zurückgegeben, falls diese > 10m ist.
+/// ORS dient als Fallback für OSRM und erfordert einen API-Schlüssel (`ORS_API_KEY`).
+/// Meldet ORS eine 0m-Route, wird die Haversine-Distanz (Luftlinie) zurückgegeben,
+/// falls diese Luftlinie größer als 10m ist. Andernfalls wird der Fehler ausgegeben.
 ///
 /// # Arguments
 ///
@@ -244,7 +242,7 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
 
             if haversine_dist > 10.0 {
                 eprintln!(
-                    "⚠️ ORS Route war 0m, aber Luftlinie ist {:.2}m. Rückgabe Luftlinie.",
+                    "📐 Fallback: ORS-Route war 0m. Rückgabe Luftlinie ({:.2}m).",
                     haversine_dist
                 );
                 return Ok(RouteDetails {
@@ -266,8 +264,8 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
 /// Ermittelt den nächstgelegenen Hydranten unter den Kandidaten,
 /// basierend auf der berechneten Geh-Route (unter Verwendung von `fetch_route_osrm` mit ORS-Fallback).
 ///
-/// **Optimierung:** Wenn der Hydrant, der per Luftlinie am nächsten liegt,
-/// bereits innerhalb des `PROXIMITY_THRESHOLD_METERS` liegt, wird sofort diese Position
+/// Optimierung: Wenn der Hydrant, der per Luftlinie am nächsten liegt,
+/// bereits innerhalb des `PROXIMITY_THRESHOLD_METERS` (5m) liegt, wird sofort diese Position
 /// ohne Routenberechnung zurückgegeben.
 ///
 /// # Arguments
@@ -300,7 +298,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
 
     if haversine_dist <= PROXIMITY_THRESHOLD_METERS {
         return Ok(RankedHydrant {
-            location: first_hydrant_location.clone(),
+            hydrant: first_hydrant_location.clone(),
             route_details: RouteDetails {
                 distance_meters: haversine_dist,
                 geometry_polyline: String::new(),
@@ -314,7 +312,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
     let pb = ProgressBar::new_spinner();
     pb.set_style(spinner_style);
     pb.set_message(
-        "🧭 Berechne Routen zum nächstgelegenen Hydranten..."
+        "🧭 Berechne Routen zu Hydranten..."
     );
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
@@ -328,7 +326,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
         match fetch_route_osrm(&client, user_location, hydrant).await {
             Ok(details) => {
                 let candidate = RankedHydrant {
-                    location: hydrant.clone(),
+                    hydrant: hydrant.clone(),
                     route_details: details,
                 };
 
@@ -344,7 +342,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
             }
             Err(e) => {
                 // Fehler loggen, aber nicht abbrechen
-                pb.println(format!("⚠️ Fehler bei Route: {}", e));
+                pb.println(format!("⚠️ Route übersprungen: {}", e));
             }
         }
 
@@ -356,7 +354,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
 
     pb.finish();
 
-    best_hydrant.ok_or_else(|| anyhow::anyhow!("Keine gültige Route gefunden."))
+    best_hydrant.ok_or_else(|| anyhow::anyhow!("❌ Keine gültige Route zu Hydranten gefunden."))
 }
 
 /// Ruft eine statische Karte von der Stadia Maps API ab, die die Route anzeigt.
@@ -377,7 +375,7 @@ pub async fn get_map(user: &Location, hydrant: &RankedHydrant, width: u32, heigh
     let api_key = env::var("STADIAMAPS_API_KEY")
         .context("❌ STADIAMAPS_API_KEY Umgebungsvariable muss gesetzt sein. Kartenerstellung nicht möglich.")?;
 
-    let hydrant_loc = &hydrant.location;
+    let hydrant_loc = &hydrant.hydrant;
     let polyline_param = &hydrant.route_details.geometry_polyline;
     let zoom = calculate_zoom_level(user, hydrant_loc);
 
