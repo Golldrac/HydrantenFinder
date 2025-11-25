@@ -1,5 +1,6 @@
 use anyhow::Result;
 use image::{GenericImageView, EncodableLayout};
+use indicatif::{ProgressBar, ProgressStyle};
 use minifb::{Window, WindowOptions, Key};
 use std::path::Path;
 use windows::Devices::Geolocation::{Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy};
@@ -20,7 +21,7 @@ const TIMEOUT_DURATION_NANOS: i64 = 5 * DURATION_FACTOR;
 ///
 /// Ein Wert unter 1.0 bewirkt ein **Herauszoomen** (Bild wird verkleinert, um auf den Bildschirm zu passen),
 /// während ein Wert über 1.0 ein **Hineinzoomen** bewirkt.
-const SCALE_FACTOR: f32 = 0.8;
+const SCALE_FACTOR: f32 = 0.6;
 
 /// Ruft die aktuellen geographischen Koordinaten des Benutzers über die Windows Geolocation API ab.
 ///
@@ -70,8 +71,7 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
 /// Lädt ein Bild von einem Pfad, skaliert es (entsprechend `SCALE_FACTOR`)
 /// und zeigt es in einem `minifb`-Fenster an.
 ///
-/// Das Bild wird auf das **ARGB-Format (u32)** für `minifb` konvertiert und
-/// in einer Ereignisschleife angezeigt, bis der Benutzer **ESC** drückt oder das Fenster schließt.
+/// Während der Lade- und Konvertierungsphase wird ein **Konsolen-Spinner** angezeigt.
 ///
 /// # Arguments
 ///
@@ -82,7 +82,20 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
 /// Gibt einen Fehler zurück, wenn das Bild nicht geladen/dekodiert werden kann oder
 /// `minifb`-Operationen fehlschlagen.
 pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
-    // 1. Das Bild laden und dekodieren
+    // Spinner-Style wie in api.rs angenommen
+    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap();
+
+
+    // Erstellen Sie den Spinner
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(spinner_style);
+    pb.set_message(
+        "🖼️ Lade und berechne Bildpuffer...  ."
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+
+    // 2. Das Bild laden, dekodieren und skalieren
     let img = image::open(Path::new(file_path))?;
 
     // Berechne die neuen Abmessungen basierend auf dem globalen Skalierungsfaktor
@@ -90,7 +103,6 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
     let new_height = (img.height() as f32 * SCALE_FACTOR) as u32;
 
     // Skaliere das Bild auf die neue Größe (Herauszoomen).
-    // Die Methode Lanczos3 bietet eine hohe Qualität für Verkleinerungen.
     let resized_img = img.resize_exact(
         new_width,
         new_height,
@@ -101,9 +113,7 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
     let width = resized_img.width() as usize;
     let height = resized_img.height() as usize;
 
-    // 2. Den Pixelpuffer vorbereiten
-    // 'minifb' benötigt einen Puffer von u32-Werten, wobei jeder u32
-    // die 32-Bit-Farbinformation (ARGB) eines Pixels darstellt.
+    // 3. Den Pixelpuffer vorbereiten
     let mut buffer: Vec<u32> = vec![0; width * height];
 
     // Iteriere über die Pixel des skalierten Bildes und konvertiere sie in das u32-Format.
@@ -111,8 +121,8 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
         // 'pixel.0' ist ein Array von [r, g, b, a] oder [r, g, b]
         let (r, g, b, a) = match pixel.0.len() {
             4 => (pixel.0[0] as u32, pixel.0[1] as u32, pixel.0[2] as u32, pixel.0[3] as u32),
-            3 => (pixel.0[0] as u32, pixel.0[1] as u32, pixel.0[2] as u32, 255u32), // Keine Alpha-Werte (Opak)
-            _ => continue, // Nicht unterstütztes Format
+            3 => (pixel.0[0] as u32, pixel.0[1] as u32, pixel.0[2] as u32, 255u32),
+            _ => continue,
         };
 
         // ARGB-Format: (Alpha << 24) | (Rot << 16) | (Grün << 8) | (Blau)
@@ -121,25 +131,28 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
         // Berechne den Index im flachen Puffer
         let index = (y as usize) * width + (x as usize);
         buffer[index] = color;
+        pb.inc(1);
     }
 
-    // 3. Das Fenster erstellen
+    // 4. Spinner beenden, bevor das Fenster erstellt wird
+
+
+    // 5. Das Fenster erstellen
     let mut window = Window::new(
-        "Rust Bildanzeige (ESC zum Schließen)",
+        "Route (ESC zum Schließen)",
         width,
         height,
         // Optionen für das Fenster
         WindowOptions {
-            // minifb passt das Fenster an die Bildschirmauflösung an.
             scale: minifb::Scale::FitScreen,
-            ..WindowOptions::default() // Übernimmt den Rest der Standardeinstellungen
+            ..WindowOptions::default()
         },
     )?;
 
     // Begrenze die Aktualisierungsrate des Fensters auf 60 FPS
     window.limit_update_rate(Some(std::time::Duration::from_millis(1000 / 60)));
-
-    // 4. Die Ereignisschleife (Loop)
+    pb.finish();
+    // 6. Die Ereignisschleife (Loop)
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // Aktualisiere den Fensterinhalt mit dem Pixelpuffer
         window.update_with_buffer(&buffer, width, height)?;

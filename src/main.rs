@@ -4,11 +4,11 @@ mod utils;
 
 use anyhow::Result;
 use dotenvy::dotenv;
-use opener;
+use indicatif::{ProgressBar, ProgressStyle};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tokio::task;
 use crate::models::Location;
-use crate::utils::show_image_in_minifb;
 use crate::utils::get_user_coordinates;
 
 
@@ -39,9 +39,20 @@ async fn main() -> Result<()> {
         let mut file = File::create(file_path).await?;
         file.write_all(&map_bytes).await?;
 
-        // 5. Karte automatisch öffnen
-        utils::show_image_in_minifb(file_path)?;
-        println!("✅ Route gespeichert und Karte geöffnet: {}.", file_path);
+    // 5. Karte in einem separaten, blockierenden Thread öffnen
+    // Die GUI-Funktion `show_image_in_minifb` ist blockierend und muss daher
+    // mit `tokio::task::spawn_blocking` aus dem asynchronen Tokio-Executor ausgelagert werden.
+    let join_handle = task::spawn_blocking(move || {
+        // Der Code hier blockiert den blockierenden Thread, aber nicht den Main-Executor.
+        utils::show_image_in_minifb(&file_path)
+    });
+
+    println!("✅ Route gespeichert und Karte wird geöffnet: {}.", file_path);
+
+    // Asynchron auf die Beendigung des blockierenden Threads warten.
+    // Das Programm wartet hier, bis das `minifb`-Fenster geschlossen wird.
+    // Der erste `?` behandelt Fehler beim Thread-Beitritt (JoinError), der zweite das `Result` der Funktion.
+    join_handle.await??;
 
     Ok(())
 }
