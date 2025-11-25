@@ -16,7 +16,7 @@ pub struct LocationResponse {
 /// Repräsentiert die Geometrie eines GeoJSON-Objekts (verwendet von ORS und OSRM).
 #[derive(Debug, Deserialize)]
 pub struct GeoJsonGeometry {
-    /// Die Liste der Koordinatenpunkte der Geometrie.
+    /// Die Liste der Koordinatenpunkte der Geometrie (Array von [Länge, Breite]-Paaren).
     pub coordinates: Vec<Vec<f64>>,
     /// Der Typ der GeoJSON-Geometrie (z.B. "LineString").
     #[serde(rename = "type")]
@@ -35,7 +35,7 @@ pub struct RouteLeg {
 pub struct Route {
     /// Die Segmente der Route.
     pub legs: Vec<RouteLeg>,
-    /// Die Geometrie der Route, kodiert als Polyline String.
+    /// Die Geometrie der Route, kodiert als Polyline String (mit Standard-Präzision).
     pub geometry: String,
 }
 
@@ -84,6 +84,7 @@ pub struct ORSResponse {
 
 /// Repräsentiert eine geographische Position (Breite und Länge).
 ///
+/// Wird für die Position des Benutzers und die Position des Hydranten verwendet.
 /// Die Felder werden für die Serialisierung/Deserialisierung mit Overpass (`lon`/`lat`) angepasst.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Location {
@@ -93,6 +94,9 @@ pub struct Location {
     /// Die Breite (Latitude) der Position. Wird von `serde` von "lat" umbenannt.
     #[serde(rename = "lat")]
     pub latitude: f64,
+    /// Optionale Tags, falls die Position ein OSM-Element mit Tags (wie ein Hydrant) ist.
+    #[serde(rename = "tags")]
+    pub tags: Option<HydrantTags>,
 }
 
 /// Details einer berechneten Route zwischen zwei Punkten.
@@ -100,15 +104,81 @@ pub struct Location {
 pub struct RouteDetails {
     /// Die berechnete Distanz der Route in Metern (z.B. Fußweglänge).
     pub distance_meters: f64,
-    /// Die Route selbst, kodiert als Polyline String (z.B. für Stadia Maps).
+    /// Die Route selbst, kodiert als Polyline String (z.B. für Stadia Maps). Kann leer sein, wenn Fallback auf Haversine.
     pub geometry_polyline: String,
+}
+
+/// Repräsentiert die Form (Bauart) des Hydranten.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum HydrantShape {
+    #[serde(rename = "pipe")]
+    Pipe,
+    #[serde(rename = "pillar")]
+    Pillar, // Überflurhydrant
+    #[serde(rename = "underground")]
+    Underground, // Unterflurhydrant
+    #[serde(rename = "wall")]
+    Wall,
+}
+
+impl HydrantShape {
+    /// Liefert die benutzerfreundliche, deutsche Beschreibung der Form.
+    pub fn to_display_name(&self) -> &'static str {
+        match self {
+            HydrantShape::Pipe => "Rohrhydrant",
+            HydrantShape::Pillar => "Überflurhydrant",
+            HydrantShape::Wall => "Wandhydrant",
+            HydrantShape::Underground => "Unterflurhydrant",
+        }
+    }
+}
+
+/// Repräsentiert die genaue Position des Hydranten im Straßenraum.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum HydrantPosition {
+    #[serde(rename = "green")]
+    Green, // Grünfläche
+    #[serde(rename = "lane")]
+    Lane, // Straße
+    #[serde(rename = "parking_lot")]
+    ParkingLot, // Parkplatz
+    #[serde(rename = "sidewalk")]
+    Sidewalk, // Gehweg
+}
+
+impl HydrantPosition {
+    /// Liefert die benutzerfreundliche, deutsche Beschreibung der Position.
+    pub fn to_display_name(&self) -> &'static str {
+        match self {
+            HydrantPosition::Green => "Grünfläche",
+            HydrantPosition::Lane => "Straße",
+            HydrantPosition::ParkingLot => "Parkplatz",
+            HydrantPosition::Sidewalk => "Gehweg",
+        }
+    }
+}
+
+/// Die von der Overpass API zurückgegebenen Tags für einen Hydranten.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HydrantTags {
+    /// Die Bauart des Hydranten (`fire_hydrant:type`).
+    #[serde(rename = "fire_hydrant:type")]
+    pub shape: Option<HydrantShape>,
+
+    /// Die genaue Position im Straßenraum (`fire_hydrant:position`).
+    #[serde(rename = "fire_hydrant:position")]
+    pub position: Option<HydrantPosition>,
+
+    /// Der Durchmesser des Hydrantenrohres in Millimetern (`fire_hydrant:diameter`).
+    #[serde(rename = "fire_hydrant:diameter")]
+    pub diameter: Option<String>,
 }
 
 /// Ein Hydrant, der nach seiner Routendistanz zum Benutzer gerankt wurde.
 #[derive(Debug)]
 pub struct RankedHydrant {
     /// Die geographische Position des Hydranten.
-    pub location: Location,
+    pub hydrant: Location,
     /// Die Routendetails vom Benutzer zu diesem Hydranten.
     pub route_details: RouteDetails,
 }
@@ -122,7 +192,7 @@ pub struct MapMarker {
     pub lat: f64,
     /// Die Länge (Longitude) des Markers.
     pub lon: f64,
-    /// Optionale Farbe des Markers.
+    /// Optionale Farbe des Markers (z.B. "red", "blue").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// Optionales Label/Textzeichen auf dem Marker.
@@ -135,7 +205,7 @@ pub struct MapMarker {
 pub struct MapLine {
     /// Die Form (Shape) der Linie, kodiert als Polyline String.
     pub shape: String,
-    /// Optionale Farbe der Linie.
+    /// Optionale Farbe der Linie (z.B. "red").
     #[serde(rename = "color", skip_serializing_if = "Option::is_none")]
     pub stroke_color: Option<String>,
     /// Optionale Dicke der Linie in Pixeln.
@@ -162,7 +232,7 @@ pub struct MapRequest {
 
 
 impl Location {
-    /// Erstellt eine neue `Location` Instanz.
+    /// Erstellt eine neue `Location` Instanz ohne Hydranten-Tags.
     ///
     /// # Arguments
     ///
@@ -172,7 +242,29 @@ impl Location {
         Location {
             longitude: lon,
             latitude: lat,
+            tags: None,
         }
+    }
+
+}
+
+impl HydrantTags {
+    pub fn output(&self){
+        if let Some(shape) = &self.shape {
+            println!("🧯 Es handelt sich um einen {}", shape.to_display_name());
+        }
+        if let Some(diameter) = &self.diameter {
+            println!("🧯 Das Rohr hat einen Durchmesser von {}mm", diameter);
+        }
+        if let Some(position) = &self.position {
+            match position {
+                HydrantPosition::Green => println!("🧯 Der Hydrant befindet sich auf sich einer Grünfläche."),
+                HydrantPosition::Lane => println!("🧯 Der Hydrant befindet sich auf der Straße."),
+                HydrantPosition::ParkingLot => println!("🧯 Der Hydrant befindet sich auf einem Parkplatz."),
+                HydrantPosition::Sidewalk => println!("🧯 Der Hydrant befindet sich auf dem Gehweg."),
+            }
+        }
+
     }
 
 }
