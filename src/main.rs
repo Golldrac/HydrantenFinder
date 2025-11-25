@@ -8,6 +8,7 @@ use opener;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use crate::models::Location;
+use crate::utils::show_image_in_minifb;
 use crate::utils::get_user_coordinates;
 
 
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
         file.write_all(&map_bytes).await?;
 
         // 5. Karte automatisch öffnen
-        opener::open(file_path)?;
+        utils::show_image_in_minifb(file_path)?;
         println!("✅ Route gespeichert und Karte geöffnet: {}.", file_path);
 
     Ok(())
