@@ -29,11 +29,11 @@ async fn main() -> Result<()> {
 
     // 3. Den nächstgelegenen Hydranten per Route (Fußweg) ermitteln
     let best_hydrant = api::get_closest_by_route(&user_location, &hydrants).await?;
-    println!(
-        "🔥 Nächster Hydrant gefunden: Distanz: {:.1}m.",
-        best_hydrant.route_details.distance_meters
-    );
-    best_hydrant.hydrant.tags.clone().expect("REASON").output();
+    println!("🔥 Nächster Hydrant gefunden: Distanz: {:.1}m.", best_hydrant.route_details.distance_meters);
+
+    if let Some(tags) = best_hydrant.hydrant.tags.clone() {
+        tags.output();
+    }
 
     // 4. Statische Karte erstellen und speichern
     let map_bytes = api::get_map(&user_location, &best_hydrant, 800, 600).await?;

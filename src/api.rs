@@ -9,6 +9,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use polyline;
 use reqwest;
 use serde_json;
+use std::sync::{Arc, Mutex};
+use tokio::task;
 use tokio::time::sleep;
 
 use crate::models::{HydrantTags, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse, RankedHydrant, RouteDetails};
@@ -264,6 +266,9 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
 /// Ermittelt den nächstgelegenen Hydranten unter den Kandidaten,
 /// basierend auf der berechneten Geh-Route (unter Verwendung von `fetch_route_osrm` mit ORS-Fallback).
 ///
+/// Parallelisierung: Die Routenberechnung für jeden Kandidaten erfolgt asynchron und parallel
+/// mithilfe von `tokio::task::spawn`. Der beste Hydrant wird durch `Arc<Mutex<T>>` sicher über Tasks hinweg aktualisiert.
+///
 /// Optimierung: Wenn der Hydrant, der per Luftlinie am nächsten liegt,
 /// bereits innerhalb des `PROXIMITY_THRESHOLD_METERS` (5m) liegt, wird sofort diese Position
 /// ohne Routenberechnung zurückgegeben.
@@ -285,7 +290,6 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
         anyhow::bail!("🗺️ Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
     }
 
-
     // Prüfen, ob der nächste (Luftlinie) Hydrant bereits in Reichweite ist
     let user_location_point = Point::new(user_location.longitude, user_location.latitude);
     let first_hydrant_location = &candidate_hydrants[0];
@@ -297,6 +301,11 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
     let haversine_dist = user_location_point.haversine_distance(&hydrant_point);
 
     if haversine_dist <= PROXIMITY_THRESHOLD_METERS {
+        // Konsolenausgabe angepasst, um zum Stil zu passen
+        println!(
+            "✅ Nächster Hydrant (< {}m) in direkter Reichweite. Überspringe Routenberechnung.",
+            PROXIMITY_THRESHOLD_METERS
+        );
         return Ok(RankedHydrant {
             hydrant: first_hydrant_location.clone(),
             route_details: RouteDetails {
@@ -305,11 +314,11 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
             },
         });
     }
+
     let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap();
 
-
-    // Erstellen Sie den Spinner
-    let pb = ProgressBar::new_spinner();
+    // Erstellen Sie den Spinner zur Visualisierung der parallelen Abarbeitung
+    let pb = ProgressBar::new(candidate_hydrants.len() as u64); // Progress Bar mit Gesamtzahl der Aufgaben
     pb.set_style(spinner_style);
     pb.set_message(
         "🧭 Berechne Routen zu Hydranten..."
@@ -320,41 +329,89 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
         .user_agent("HydrantenFinder/1.0")
         .build()?;
 
-    let mut best_hydrant: Option<RankedHydrant> = None;
+    // Bestes Ergebnis, geschützt durch Arc<Mutex> für sicheren, gleichzeitigen Zugriff
+    let best_hydrant_arc: Arc<Mutex<Option<RankedHydrant>>> = Arc::new(Mutex::new(None));
+
+    // Sammeln Sie alle Handles, um später auf den Abschluss aller Tasks zu warten
+    let mut join_handles = Vec::new();
+
+    // Die Benutzerposition muss geklont werden, da jede Task den *Besitz* an ihren Daten benötigt
+    let user_location_owned = user_location.clone();
 
     for hydrant in candidate_hydrants {
-        match fetch_route_osrm(&client, user_location, hydrant).await {
-            Ok(details) => {
-                let candidate = RankedHydrant {
-                    hydrant: hydrant.clone(),
-                    route_details: details,
-                };
+        // --- Klonen der benötigten Variablen für die asynchrone Task ---
+        // Klon des reqwest-Clients (effizient durch interne Arc-Verwendung)
+        let client_clone = client.clone();
 
-                // Ist dieser Hydrant näher als der bisher beste?
-                match best_hydrant {
-                    None => best_hydrant = Some(candidate),
-                    Some(ref current_best) => {
-                        if candidate.route_details.distance_meters < current_best.route_details.distance_meters {
-                            best_hydrant = Some(candidate);
+        // Klon des Mutex-Arcs, um den gemeinsamen Zugriff zu teilen
+        let best_hydrant_clone = Arc::clone(&best_hydrant_arc);
+
+        // Klon der ProgressBar, um den Fortschritt von der Task aus zu aktualisieren
+        let pb_clone = pb.clone();
+
+        // Klon des aktuellen Hydranten (Besitzübernahme)
+        let hydrant_clone = hydrant.clone();
+
+        // Klon der Benutzerposition für die Routenberechnung in dieser Task
+        let user_location_task = user_location_owned.clone();
+
+        // task::spawn startet die Routenberechnung asynchron im Tokio Worker Pool
+        let handle = task::spawn(async move {
+
+            match fetch_route_osrm(&client_clone, &user_location_task, &hydrant_clone).await {
+                Ok(details) => {
+                    let candidate = RankedHydrant {
+                        hydrant: hydrant_clone,
+                        route_details: details,
+                    };
+
+                    // Sperren des Mutex für den veränderlichen Zugriff auf den besten Hydranten
+                    let mut best_hydrant_guard = best_hydrant_clone.lock().unwrap();
+
+                    match best_hydrant_guard.as_ref() {
+                        None => {
+                            // Erster gültiger Hydrant gefunden
+                            *best_hydrant_guard = Some(candidate);
+                        }
+                        Some(current_best) => {
+                            // Vergleichen und gegebenenfalls aktualisieren
+                            if candidate.route_details.distance_meters < current_best.route_details.distance_meters {
+                                *best_hydrant_guard = Some(candidate);
+                            }
                         }
                     }
                 }
+                Err(e) => {
+                    // Fehler loggen, aber nicht die gesamte Task abbrechen
+                    pb_clone.println(format!("⚠️ Route zu Hydrant übersprungen: {}", e));
+                }
             }
-            Err(e) => {
-                // Fehler loggen, aber nicht abbrechen
-                pb.println(format!("⚠️ Route übersprungen: {}", e));
-            }
-        }
+            pb_clone.inc(1); // Fortschrittszähler erhöhen
+        });
 
-        pb.inc(1);
-
-        // WICHTIG: Eine kleine Pause einlegen, um den Server nicht zu überlasten.
-        sleep(Duration::from_millis(200)).await;
+        join_handles.push(handle);
     }
 
+    // Warten Sie asynchron auf den Abschluss aller Tasks
+    for handle in join_handles {
+        // `await?` prüft auf Paniken in der Task
+        handle.await?;
+    }
+
+    // Die Progress Bar beenden
     pb.finish();
 
-    best_hydrant.ok_or_else(|| anyhow::anyhow!("❌ Keine gültige Route zu Hydranten gefunden."))
+
+    // 4. Endgültiges Ergebnis aus dem Mutex extrahieren
+    // Arc::try_unwrap gibt das innere `Mutex` zurück, wenn alle Arcs gelöscht sind
+    let final_best_hydrant = Arc::try_unwrap(best_hydrant_arc)
+        .ok()
+        .expect("Interner Fehler: Arc sollte der einzige Strong Count sein, nachdem alle Handles beendet wurden.")
+        .into_inner()
+        .expect("Interner Fehler: Mutex ist vergiftet (Task Panik in der Sperre).");
+
+
+    final_best_hydrant.ok_or_else(|| anyhow::anyhow!("❌ Keine gültige Route zu Hydranten gefunden."))
 }
 
 /// Ruft eine statische Karte von der Stadia Maps API ab, die die Route anzeigt.

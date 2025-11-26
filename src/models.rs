@@ -100,7 +100,7 @@ pub struct Location {
 }
 
 /// Details einer berechneten Route zwischen zwei Punkten.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RouteDetails {
     /// Die berechnete Distanz der Route in Metern (z.B. Fußweglänge).
     pub distance_meters: f64,
@@ -175,7 +175,7 @@ pub struct HydrantTags {
 }
 
 /// Ein Hydrant, der nach seiner Routendistanz zum Benutzer gerankt wurde.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RankedHydrant {
     /// Die geographische Position des Hydranten.
     pub hydrant: Location,
