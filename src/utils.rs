@@ -1,12 +1,15 @@
+use crate::models::Location;
 use anyhow::Result;
-use image::{GenericImageView, EncodableLayout};
+use image::{EncodableLayout, GenericImageView};
 use indicatif::{ProgressBar, ProgressStyle};
-use minifb::{Window, WindowOptions, Key};
+use minifb::{Key, Window, WindowOptions};
 use std::path::Path;
-use windows::Devices::Geolocation::{Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy};
+use std::time::Duration;
+use windows::Devices::Geolocation::{
+    Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
+};
 use windows::Foundation::TimeSpan;
 use windows_future::IAsyncOperation;
-use crate::models::Location;
 
 /// Konvertiert Sekunden in die 100-Nanosekunden-Einheit, die für `TimeSpan::Duration` benötigt wird.
 const DURATION_FACTOR: i64 = 10_000_000; // 1 Sekunde = 10 Millionen * 100ns
@@ -37,18 +40,18 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
 
     match access_status {
         GeolocationAccessStatus::Allowed => {
-
             let geolocator = Geolocator::new()?;
             geolocator.SetDesiredAccuracy(PositionAccuracy::Default)?;
 
-            let max_age = TimeSpan { Duration: MAX_AGE_DURATION_NANOS };
-            let timeout = TimeSpan { Duration: TIMEOUT_DURATION_NANOS };
+            let max_age = TimeSpan {
+                Duration: MAX_AGE_DURATION_NANOS,
+            };
+            let timeout = TimeSpan {
+                Duration: TIMEOUT_DURATION_NANOS,
+            };
 
-            let operation: IAsyncOperation<Geoposition> = geolocator
-                .GetGeopositionAsyncWithAgeAndTimeout(
-                    max_age,
-                    timeout
-                )?;
+            let operation: IAsyncOperation<Geoposition> =
+                geolocator.GetGeopositionAsyncWithAgeAndTimeout(max_age, timeout)?;
 
             let geoposition = operation.await?;
             let geocoordinate: Geocoordinate = geoposition.Coordinate()?;
@@ -56,13 +59,13 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
             let loc = Location::new(geocoordinate.Longitude()?, geocoordinate.Latitude()?);
 
             Ok(loc)
-        },
+        }
         GeolocationAccessStatus::Denied => {
             anyhow::bail!("❌ Standortzugriff wurde in den Windows-Einstellungen verweigert.");
-        },
+        }
         GeolocationAccessStatus::Unspecified => {
             anyhow::bail!("⚠️ Unspezifizierter Fehler beim Abrufen des Standortzugriffs.");
-        },
+        }
         // Deckt zukünftige/unbekannte Status ab.
         _ => anyhow::bail!("❓ Unbekannter Standortzugriffsstatus."),
     }
@@ -82,18 +85,12 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
 /// Gibt einen Fehler zurück, wenn das Bild nicht geladen/dekodiert werden kann oder
 /// `minifb`-Operationen fehlschlagen.
 pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
-    // Spinner-Style wie in api.rs angenommen
-    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap();
-
-
-    // Erstellen Sie den Spinner
+    // 1. Spinner initialisieren
+    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}")?;
     let pb = ProgressBar::new_spinner();
     pb.set_style(spinner_style);
-    pb.set_message(
-        "🖼️ Lade und berechne Bildpuffer...  ."
-    );
+    pb.set_message("🖼️ Lade und berechne Bildpuffer...  .");
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
 
     // 2. Das Bild laden, dekodieren und skalieren
     let img = image::open(Path::new(file_path))?;
@@ -103,11 +100,8 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
     let new_height = (img.height() as f32 * SCALE_FACTOR) as u32;
 
     // Skaliere das Bild auf die neue Größe (Herauszoomen).
-    let resized_img = img.resize_exact(
-        new_width,
-        new_height,
-        image::imageops::FilterType::Lanczos3
-    );
+    let resized_img =
+        img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3);
 
     // Abmessungen des *skalierten* Bildes abrufen
     let width = resized_img.width() as usize;
@@ -120,8 +114,18 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
     for (x, y, pixel) in resized_img.pixels() {
         // 'pixel.0' ist ein Array von [r, g, b, a] oder [r, g, b]
         let (r, g, b, a) = match pixel.0.len() {
-            4 => (pixel.0[0] as u32, pixel.0[1] as u32, pixel.0[2] as u32, pixel.0[3] as u32),
-            3 => (pixel.0[0] as u32, pixel.0[1] as u32, pixel.0[2] as u32, 255u32),
+            4 => (
+                pixel.0[0] as u32,
+                pixel.0[1] as u32,
+                pixel.0[2] as u32,
+                pixel.0[3] as u32,
+            ),
+            3 => (
+                pixel.0[0] as u32,
+                pixel.0[1] as u32,
+                pixel.0[2] as u32,
+                255u32,
+            ),
             _ => continue,
         };
 
@@ -134,8 +138,8 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
         pb.inc(1);
     }
 
-    // 4. Spinner beenden, bevor das Fenster erstellt wird
-
+    pb.finish();
+    println!("✅ Route gespeichert und Karte wird geöffnet: {}.", file_path);
 
     // 5. Das Fenster erstellen
     let mut window = Window::new(
@@ -151,7 +155,8 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
 
     // Begrenze die Aktualisierungsrate des Fensters auf 60 FPS
     window.limit_update_rate(Some(std::time::Duration::from_millis(1000 / 60)));
-    pb.finish();
+
+
     // 6. Die Ereignisschleife (Loop)
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // Aktualisiere den Fensterinhalt mit dem Pixelpuffer
