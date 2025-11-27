@@ -186,7 +186,7 @@ pub struct RankedHydrant {
 /// --- API / Stadia Maps Static Map Request Structs ---
 
 /// Repräsentiert einen einzelnen Marker (Punkt) auf der statischen Karte.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct MapMarker {
     /// Die Breite (Latitude) des Markers.
     pub lat: f64,
@@ -201,7 +201,7 @@ pub struct MapMarker {
 }
 
 /// Repräsentiert eine Linie (z.B. eine Route) auf der statischen Karte.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct MapLine {
     /// Die Form (Shape) der Linie, kodiert als Polyline String.
     pub shape: String,
@@ -214,7 +214,7 @@ pub struct MapLine {
 }
 
 /// Repräsentiert die gesamte JSON-Anfrage (POST-Body) an die Stadia Maps Static API.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct MapRequest {
     /// Die Koordinaten des Kartenzentrums (z.B. "lat,lon").
     pub center: String,

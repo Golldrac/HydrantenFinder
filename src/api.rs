@@ -2,8 +2,8 @@ use std::f64::consts::PI;
 use std::env;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use geo::{Haversine, HaversineDistance, Point};
+use anyhow::{ Context, Result};
+use geo::{ HaversineDistance, Point};
 use geo_types::Coord;
 use indicatif::{ProgressBar, ProgressStyle};
 use polyline;
@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use reqwest::StatusCode;
 use tokio::task;
 use tokio::time::sleep;
+use std::future::Future;
 
-use crate::models::{HydrantTags, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse, RankedHydrant, RouteDetails};
+use crate::models::{ Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse, RankedHydrant, RouteDetails};
 
 /// Die Genauigkeit, mit der Polylines kodiert werden sollen.
 const POLYLINE_PRECISION: u32 = 6;
@@ -28,6 +29,8 @@ const MAX_ZOOM: u32 = 18;
 
 /// Ruft Hydranten im angegebenen Radius um die übergebene Position von der Overpass API ab.
 ///
+/// Führt interne Retries bei transienten Fehlern durch.
+///
 /// # Arguments
 ///
 /// * `location` - Die Startposition.
@@ -39,7 +42,7 @@ const MAX_ZOOM: u32 = 18;
 ///
 /// # Errors
 ///
-/// Gibt einen Fehler zurück, wenn die Overpass API einen nicht erfolgreichen Statuscode zurückgibt.
+/// Gibt einen Fehler zurück, wenn die Overpass API nach allen Retries einen nicht erfolgreichen Statuscode zurückgibt.
 pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Location>> {
     let lat = location.latitude;
     let lon = location.longitude;
@@ -79,9 +82,8 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
     let response = match response {
         Ok(r) => r,
         Err(e) => {
-
-            // Dein Fallback von OSRM auf ORS bleibt hier erhalten!
-            anyhow::bail!("❌ Overpass API Aufruf fehlgeschlagen nach Retries: {}", e);
+            // Der Fehler kommt von retry_on_failure
+            anyhow::bail!("❌ Overpass-API-Aufruf fehlgeschlagen: {}", e);
         }
     };
 
@@ -92,13 +94,13 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
             .await
             .context("Overpass: Kein Antwort-Body verfügbar")?;
         anyhow::bail!(
-            "❌ Overpass API Fehler (Status: {}). Antwort: {}",
+            "❌ Overpass-API-Fehler (Status: {}). Antwort: {}",
             status,
             body
         );
     }
 
-   let response_body = response.json::<LocationResponse>().await?;
+    let response_body = response.json::<LocationResponse>().await?;
 
     Ok(response_body.elements)
 }
@@ -125,6 +127,7 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
         .context("Fehler beim Abruf der Hydranten")?;
 
     if hydrant_locations.is_empty() {
+        // Einheitliche Fehlermeldung
         anyhow::bail!("🔍 Keine Hydranten in der Nähe gefunden (Radius: {}m).", radius_m);
     }
 
@@ -154,8 +157,8 @@ pub async fn get_nearest_hydrants(location: &Location, amount: Option<usize>) ->
 
 /// Berechnet die Route zwischen Start und Ziel mithilfe der OSRM (Open Source Routing Machine) API.
 ///
-/// **Wichtig:** Bei Netzwerkfehlern, HTTP-Fehler-Statuscodes oder ungültiger/0m Route
-/// wird automatisch auf `fetch_route_ors` zurückgefallen.
+/// Führt interne Retries bei transienten Fehlern durch. Bei permanenten Fehlern,
+/// HTTP-Fehler-Statuscodes oder ungültiger/0m Route wird automatisch auf `fetch_route_ors` zurückgefallen.
 ///
 /// # Arguments
 ///
@@ -192,23 +195,21 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
     )
         .await;
 
-    // Das match hier fängt jetzt ALLES ab (permanente Fehler oder gescheiterte Retries)
+    // Behandelt gescheiterte Retries (Netzwerkfehler)
     let response = match response {
         Ok(r) => r,
         Err(e) => {
-            // Dieser Pfad wird jetzt bei ALLEN Fehlern erreicht,
-            // die entweder nicht transient sind ODER nach max_retries aufgetreten sind.
-            eprintln!("🌐 OSRM-Fehler: {}. Versuche ORS...", e);
-            // -> alter Fehlerfall (Fallback auf ORS)
+            // Einheitliche Log-Ausgabe
+            eprintln!("⚠️ OSRM-Netzwerkfehler (nach Retries): {}. Versuche ORS...", e);
+            // Fallback auf ORS
             return fetch_route_ors(client, start, destination).await;
         }
     };
 
-    // ALTER FEHLERFALL: Statuscode-Prüfung (z.B. OSRM liefert 200, aber leere Route)
-    // Wenn die Antwort ok war, prüfen wir den Statuscode der Antwort (alte Logik)
+    // Behandelt HTTP Status Code Fehler
     if !response.status().is_success() {
-        eprintln!("🚦 OSRM-Statusfehler: {}. Versuche ORS...", response.status());
-        // -> alter Fehlerfall (Fallback auf ORS)
+        eprintln!("⚠️ OSRM-API-Fehler (Status: {}). Versuche ORS...", response.status());
+        // Fallback auf ORS
         return fetch_route_ors(client, start, destination).await;
     }
 
@@ -218,6 +219,8 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
     if let Some(route) = response_body.routes.into_iter().next() {
         if let Some(leg) = route.legs.into_iter().next() {
             if leg.distance == 0.0 {
+                // 0m-Route Fallback
+                eprintln!("⚠️ OSRM lieferte 0m-Route. Versuche ORS...");
                 return fetch_route_ors(client, start, destination).await;
             }
             return Ok(RouteDetails {
@@ -228,14 +231,16 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
     }
 
     // Fallback, wenn keine Route im Body gefunden wurde
+    eprintln!("⚠️ OSRM lieferte keine Route im Body. Versuche ORS...");
     fetch_route_ors(client, start, destination).await
 }
 
 /// Berechnet die Route zwischen Start und Ziel mithilfe der OpenRouteService (ORS) API.
 ///
-/// ORS dient als Fallback für OSRM und erfordert einen API-Schlüssel (`ORS_API_KEY`).
-/// Meldet ORS eine 0m-Route, wird die Haversine-Distanz (Luftlinie) zurückgegeben,
-/// falls diese Luftlinie größer als 10m ist. Andernfalls wird der Fehler ausgegeben.
+/// Führt interne Retries bei transienten Fehlern durch. ORS dient als Fallback für OSRM
+/// und erfordert einen API-Schlüssel (`ORS_API_KEY`). Meldet ORS eine 0m-Route, wird die
+/// Haversine-Distanz (Luftlinie) zurückgegeben, falls diese Luftlinie größer als 10m ist.
+/// Andernfalls wird der Fehler ausgegeben.
 ///
 /// # Arguments
 ///
@@ -246,7 +251,7 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
 /// # Errors
 ///
 /// Gibt einen Fehler zurück, wenn die `ORS_API_KEY` Umgebungsvariable fehlt oder
-/// die API einen Fehlerstatus zurückgibt.
+/// die API nach allen Retries einen Fehlerstatus zurückgibt.
 pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destination: &Location) -> Result<RouteDetails> {
     let api_key =
         env::var("ORS_API_KEY").context("❌ ORS_API_KEY Umgebungsvariable muss gesetzt sein. Routing nicht möglich.")?;
@@ -256,7 +261,7 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
         api_key, start.longitude, start.latitude, destination.longitude, destination.latitude
     );
 
-    let response = client.get(&url).send().await?;let response = retry_on_failure(
+    let response = retry_on_failure(
         || {
             // Die Closure MUSS die benötigten Variablen klonen/übernehmen,
             // da sie mehrmals in unterschiedlichen async-Tasks ausgeführt werden könnte.
@@ -279,7 +284,8 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
     let response = match response {
         Ok(r) => r,
         Err(e) => {
-            anyhow::bail!("❌ ORS-Netzwerk-/API-Fehler (nach Retries): {}", e);
+            // Einheitliche Fehlermeldung
+            anyhow::bail!("❌ ORS-API-Aufruf fehlgeschlagen: {}", e);
         }
     };
 
@@ -289,7 +295,8 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
             .text()
             .await
             .context("ORS: Kein Antwort-Body verfügbar")?;
-        anyhow::bail!("❌ ORS API Fehler (Status: {}). Antwort: {}", status, body);
+        // Einheitliche Fehlermeldung
+        anyhow::bail!("❌ ORS-API-Fehler (Status: {}). Antwort: {}", status, body);
     }
 
     let body_text = response.text().await?;
@@ -298,7 +305,8 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
         Ok(body) => body,
         Err(e) => {
             anyhow::bail!(
-                "ORS Decode Fehler: {}. Ungültige JSON-Antwort (Ausschnitt): {}",
+                // Einheitliche Fehlermeldung
+                "❌ ORS-JSON-Decode-Fehler: {}. Ungültige JSON-Antwort (Ausschnitt): {}",
                 e,
                 &body_text[..body_text.len().min(100)] // Ausschnitt für sauberere Fehlerausgabe
             );
@@ -324,7 +332,7 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
 
             if haversine_dist > 10.0 {
                 eprintln!(
-                    "📐 Fallback: ORS-Route war 0m. Rückgabe Luftlinie ({:.2}m).",
+                    "📐 Fallback: ORS-Route war 0m. Gebe Luftlinie ({:.2}m) zurück.",
                     haversine_dist
                 );
                 return Ok(RouteDetails {
@@ -340,7 +348,8 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
         });
     }
 
-    anyhow::bail!("🗺️ Keine Route (Feature) in der ORS-Antwort gefunden.");
+    // Einheitliche Fehlermeldung
+    anyhow::bail!("❌ Keine Route (Feature) in der ORS-Antwort gefunden.");
 }
 
 /// Ermittelt den nächstgelegenen Hydranten unter den Kandidaten,
@@ -367,7 +376,7 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
 /// Gibt einen Fehler zurück, wenn keine gültige Route zu einem der Hydranten gefunden werden konnte.
 pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: &[Location]) -> Result<RankedHydrant> {
     if candidate_hydrants.is_empty() {
-        anyhow::bail!("🗺️ Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
+        anyhow::bail!("❌ Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
     }
 
     // Prüfen, ob der nächste (Luftlinie) Hydrant bereits in Reichweite ist
@@ -381,9 +390,9 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
     let haversine_dist = user_location_point.haversine_distance(&hydrant_point);
 
     if haversine_dist <= PROXIMITY_THRESHOLD_METERS {
-        // Konsolenausgabe angepasst, um zum Stil zu passen
+        // Einheitliche Konsolenausgabe
         println!(
-            "✅ Nächster Hydrant (< {}m) in direkter Reichweite. Überspringe Routenberechnung.",
+            "✅ Nächster Hydrant (< {:.1}m) in direkter Reichweite. Überspringe Routenberechnung.",
             PROXIMITY_THRESHOLD_METERS
         );
         return Ok(RankedHydrant {
@@ -395,7 +404,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
         });
     }
 
-    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap();
+    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}")?;
 
     // Erstellen Sie den Spinner zur Visualisierung der parallelen Abarbeitung
     let pb = ProgressBar::new(candidate_hydrants.len() as u64); // Progress Bar mit Gesamtzahl der Aufgaben
@@ -403,7 +412,7 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
     pb.set_message(
         "🧭 Berechne Routen zu Hydranten..."
     );
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    pb.enable_steady_tick(Duration::from_millis(100));
 
     let client = reqwest::Client::builder()
         .user_agent("HydrantenFinder/1.0")
@@ -491,10 +500,13 @@ pub async fn get_closest_by_route(user_location: &Location, candidate_hydrants: 
         .expect("Interner Fehler: Mutex ist vergiftet (Task Panik in der Sperre).");
 
 
+    // Einheitliche Fehlermeldung
     final_best_hydrant.ok_or_else(|| anyhow::anyhow!("❌ Keine gültige Route zu Hydranten gefunden."))
 }
 
 /// Ruft eine statische Karte von der Stadia Maps API ab, die die Route anzeigt.
+///
+/// Führt interne Retries bei transienten Fehlern durch.
 ///
 /// Die Route und die Positionen werden im Request-Body als JSON übermittelt.
 ///
@@ -559,14 +571,40 @@ pub async fn get_map(user: &Location, hydrant: &RankedHydrant, width: u32, heigh
 
     let client = reqwest::Client::new();
 
-    println!("{:?}", request_body);
 
-    let response = client
-        .post(&url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&request_body)
-        .send()
-        .await?;
+    let response = retry_on_failure(
+        || {
+            // Die Closure MUSS die benötigten Variablen klonen/übernehmen,
+            // da sie mehrmals in unterschiedlichen async-Tasks ausgeführt werden könnte.
+            let client_clone = client.clone();
+            let url_clone = url.clone();
+            let request_body_clone = request_body.clone();
+
+            // Dies ist die asynchrone Funktion, die bei jedem Versuch neu ausgeführt wird.
+            async move {
+                // Die Antwort des Clients muss in ein anyhow::Result<Response> konvertiert werden
+                // (reqwest::Error -> anyhow::Error).
+                client_clone.post(&url_clone)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .json(&request_body_clone)
+                    .send()
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+        },
+        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
+        Duration::from_secs(2),
+    )
+        .await;
+
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => {
+            // Einheitliche Fehlermeldung
+            anyhow::bail!("❌ Stadia-Maps-API-Aufruf fehlgeschlagen: {}", e);
+        }
+    };
+
 
     if !response.status().is_success() {
         let status = response.status();
@@ -577,9 +615,9 @@ pub async fn get_map(user: &Location, hydrant: &RankedHydrant, width: u32, heigh
             .await
             .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
 
-        // Fehler auslösen, wenn der Status nicht erfolgreich ist.
+        // Einheitliche Fehlermeldung
         anyhow::bail!(
-            "🖼️ Stadia Maps API Fehler (Status: {}). Antwort: {}",
+            "❌ Stadia-Maps-API-Fehler (Status: {}). Antwort: {}",
             status,
             body
         );
@@ -621,8 +659,22 @@ pub fn calculate_zoom_level(loc1: &Location, loc2: &Location) -> u32 {
     final_zoom.clamp(0, MAX_ZOOM)
 }
 
-
-pub async fn retry_on_failure<T, F, Fut>(f: F, max_retries: u32, delay: Duration,) -> Result<T> where F: Fn() -> Fut, Fut: std::future::Future<Output = Result<T>>,{
+/// Führt die übergebene asynchrone Funktion bis zu `max_retries` Mal aus,
+/// wenn ein transienter Fehler auftritt.
+///
+/// Transiente Fehler sind: HTTP 5xx Statuscodes, HTTP 429 (Too Many Requests),
+/// Netzwerk-Timeouts und Verbindungsfehler.
+///
+/// # Arguments
+///
+/// * `f` - Die asynchrone Funktion, die ausgeführt werden soll.
+/// * `max_retries` - Die maximale Anzahl der Versuche (1. Versuch + N Retries).
+/// * `delay` - Die Wartezeit zwischen den Versuchen.
+///
+/// # Returns
+///
+/// Das Ergebnis von `f`, oder ein Fehler, wenn alle Versuche fehlschlagen.
+pub async fn retry_on_failure<T, F, Fut>(f: F, max_retries: u32, delay: Duration,) -> Result<T> where F: Fn() -> Fut, Fut: Future<Output = Result<T>>,{
     // Die aktuelle Anzahl der Versuche
     let mut attempt = 1;
 
@@ -637,7 +689,7 @@ pub async fn retry_on_failure<T, F, Fut>(f: F, max_retries: u32, delay: Duration
                 // 1. Ist der Fehler NICHT transient? -> Schleife sofort abbrechen und Fehler zurückgeben.
                 if !is_transient_error(&e) {
                     // Wichtig: Wir returnen den Fehler, damit der Aufrufer ihn matchen kann.
-                    return Err(e).context(format!("API-Aufruf fehlgeschlagen: Permanenter Fehler."));
+                    return Err(e).context("API-Aufruf fehlgeschlagen: Permanenter Fehler.");
                 }
 
                 // 2. Ist es ein transienter Fehler UND der letzte Versuch? -> Abbrechen nach Retries.
@@ -647,7 +699,7 @@ pub async fn retry_on_failure<T, F, Fut>(f: F, max_retries: u32, delay: Duration
                 }
 
                 // 3. Transienter Fehler und weitere Versuche übrig -> Warten und fortsetzen.
-                println!("⚠️ Versuch {}/{}: API fehlgeschlagen. Warte {}s...", attempt, max_retries, delay.as_secs_f32());
+                println!("⚠️ Versuch {}/{}: API fehlgeschlagen. Warte {:.1}s...", attempt, max_retries, delay.as_secs_f32());
                 sleep(delay).await;
 
                 // Zähler erhöhen und die `loop` startet automatisch den nächsten Versuch
@@ -657,11 +709,16 @@ pub async fn retry_on_failure<T, F, Fut>(f: F, max_retries: u32, delay: Duration
     }
 }
 
+/// Überprüft, ob ein `anyhow::Error` einen transienten Fehler umschließt,
+/// der durch einen Retry behoben werden könnte.
+///
+/// Transiente Fehler: HTTP 5xx, HTTP 429, Timeout, Verbindungsfehler.
 fn is_transient_error(e: &anyhow::Error) -> bool {
     // Versuche, den Fehler in einen reqwest::Error umzuwandeln
     if let Some(reqwest_error) = e.downcast_ref::<reqwest::Error>() {
         // Prüfe auf HTTP Status Code Fehler
         if let Some(status) = reqwest_error.status() {
+            // Einheitliche Fehler-Prüfung
             return status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         }
 
