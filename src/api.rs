@@ -2,7 +2,7 @@ use std::f64::consts::PI;
 use std::env;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use geo::{Haversine, HaversineDistance, Point};
 use geo_types::Coord;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -10,6 +10,7 @@ use polyline;
 use reqwest;
 use serde_json;
 use std::sync::{Arc, Mutex};
+use reqwest::StatusCode;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -54,7 +55,35 @@ pub async fn find_hydrants(location: &Location, radius_m: u32) -> Result<Vec<Loc
     let url = "https://overpass-api.de/api/interpreter";
 
     let client = reqwest::Client::new();
-    let response = client.post(url).body(query).send().await?;
+
+    let response = retry_on_failure(
+        || {
+            // Die Closure MUSS die benötigten Variablen klonen/übernehmen,
+            // da sie mehrmals in unterschiedlichen async-Tasks ausgeführt werden könnte.
+            let client_clone = client.clone();
+            let url_clone = url;
+            let query_clone = query.clone();
+
+            // Dies ist die asynchrone Funktion, die bei jedem Versuch neu ausgeführt wird.
+            async move {
+                // Die Antwort des Clients muss in ein anyhow::Result<Response> konvertiert werden
+                // (reqwest::Error -> anyhow::Error).
+                client_clone.post(url_clone).body(query_clone).send().await.map_err(anyhow::Error::from)
+            }
+        },
+        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
+        Duration::from_secs(2),
+    )
+        .await;
+
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => {
+
+            // Dein Fallback von OSRM auf ORS bleibt hier erhalten!
+            anyhow::bail!("❌ Overpass API Aufruf fehlgeschlagen nach Retries: {}", e);
+        }
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -144,16 +173,42 @@ pub async fn fetch_route_osrm(client: &reqwest::Client, start: &Location, destin
     );
 
 
-    let response = match client.get(&url).send().await {
+    let response = retry_on_failure(
+        || {
+            // Die Closure MUSS die benötigten Variablen klonen/übernehmen,
+            // da sie mehrmals in unterschiedlichen async-Tasks ausgeführt werden könnte.
+            let client_clone = client.clone();
+            let url_clone = url.clone();
+
+            // Dies ist die asynchrone Funktion, die bei jedem Versuch neu ausgeführt wird.
+            async move {
+                // Die Antwort des Clients muss in ein anyhow::Result<Response> konvertiert werden
+                // (reqwest::Error -> anyhow::Error).
+                client_clone.get(&url_clone).send().await.map_err(anyhow::Error::from)
+            }
+        },
+        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
+        Duration::from_secs(2),
+    )
+        .await;
+
+    // Das match hier fängt jetzt ALLES ab (permanente Fehler oder gescheiterte Retries)
+    let response = match response {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("🌐 OSRM-Netzwerkfehler: {}. Versuche ORS...", e);
+            // Dieser Pfad wird jetzt bei ALLEN Fehlern erreicht,
+            // die entweder nicht transient sind ODER nach max_retries aufgetreten sind.
+            eprintln!("🌐 OSRM-Fehler: {}. Versuche ORS...", e);
+            // -> alter Fehlerfall (Fallback auf ORS)
             return fetch_route_ors(client, start, destination).await;
         }
     };
 
+    // ALTER FEHLERFALL: Statuscode-Prüfung (z.B. OSRM liefert 200, aber leere Route)
+    // Wenn die Antwort ok war, prüfen wir den Statuscode der Antwort (alte Logik)
     if !response.status().is_success() {
         eprintln!("🚦 OSRM-Statusfehler: {}. Versuche ORS...", response.status());
+        // -> alter Fehlerfall (Fallback auf ORS)
         return fetch_route_ors(client, start, destination).await;
     }
 
@@ -201,7 +256,32 @@ pub async fn fetch_route_ors(client: &reqwest::Client, start: &Location, destina
         api_key, start.longitude, start.latitude, destination.longitude, destination.latitude
     );
 
-    let response = client.get(&url).send().await?;
+    let response = client.get(&url).send().await?;let response = retry_on_failure(
+        || {
+            // Die Closure MUSS die benötigten Variablen klonen/übernehmen,
+            // da sie mehrmals in unterschiedlichen async-Tasks ausgeführt werden könnte.
+            let client_clone = client.clone();
+            let url_clone = url.clone();
+
+            // Dies ist die asynchrone Funktion, die bei jedem Versuch neu ausgeführt wird.
+            async move {
+                // Die Antwort des Clients muss in ein anyhow::Result<Response> konvertiert werden
+                // (reqwest::Error -> anyhow::Error).
+                client_clone.get(&url_clone).send().await.map_err(anyhow::Error::from)
+            }
+        },
+        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
+        Duration::from_secs(2),
+    )
+        .await; // Das Ergebnis der `retry_on_failure` Funktion muss geawaited werden!
+
+    // Nun behandeln wir das finale Ergebnis:
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => {
+            anyhow::bail!("❌ ORS-Netzwerk-/API-Fehler (nach Retries): {}", e);
+        }
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -479,6 +559,8 @@ pub async fn get_map(user: &Location, hydrant: &RankedHydrant, width: u32, heigh
 
     let client = reqwest::Client::new();
 
+    println!("{:?}", request_body);
+
     let response = client
         .post(&url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -488,10 +570,14 @@ pub async fn get_map(user: &Location, hydrant: &RankedHydrant, width: u32, heigh
 
     if !response.status().is_success() {
         let status = response.status();
+        // Versuch, den Fehler-Body abzurufen. Ungültige/Fehlende Bodies werden ignoriert,
+        // um keinen doppelten Fehler beim Logging zu erzeugen.
         let body = response
             .text()
             .await
-            .context("Stadia Maps: Kein Antwort-Body verfügbar")?;
+            .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
+
+        // Fehler auslösen, wenn der Status nicht erfolgreich ist.
         anyhow::bail!(
             "🖼️ Stadia Maps API Fehler (Status: {}). Antwort: {}",
             status,
@@ -499,6 +585,7 @@ pub async fn get_map(user: &Location, hydrant: &RankedHydrant, width: u32, heigh
         );
     }
 
+    // Nur, wenn der Status erfolgreich (2xx) ist, die Bilddaten abrufen.
     Ok(response.bytes().await?.to_vec())
 }
 
@@ -532,4 +619,56 @@ pub fn calculate_zoom_level(loc1: &Location, loc2: &Location) -> u32 {
     let final_zoom = zoom_f64.floor() as u32;
 
     final_zoom.clamp(0, MAX_ZOOM)
+}
+
+
+pub async fn retry_on_failure<T, F, Fut>(f: F, max_retries: u32, delay: Duration,) -> Result<T> where F: Fn() -> Fut, Fut: std::future::Future<Output = Result<T>>,{
+    // Die aktuelle Anzahl der Versuche
+    let mut attempt = 1;
+
+    loop {
+        // 1. Funktion ausführen
+        match f().await {
+            // 2. Erfolg: Ergebnis sofort zurückgeben
+            Ok(result) => return Ok(result),
+
+            // 3. Fehler: Fehlerbehandlung
+            Err(e) => {
+                // 1. Ist der Fehler NICHT transient? -> Schleife sofort abbrechen und Fehler zurückgeben.
+                if !is_transient_error(&e) {
+                    // Wichtig: Wir returnen den Fehler, damit der Aufrufer ihn matchen kann.
+                    return Err(e).context(format!("API-Aufruf fehlgeschlagen: Permanenter Fehler."));
+                }
+
+                // 2. Ist es ein transienter Fehler UND der letzte Versuch? -> Abbrechen nach Retries.
+                if attempt >= max_retries {
+                    // Letzter Versuch fehlgeschlagen: Fehler ausgeben und beenden
+                    anyhow::bail!("❌ API-Aufruf nach {} Versuchen fehlgeschlagen. Letzter Fehler: {}", max_retries, e);
+                }
+
+                // 3. Transienter Fehler und weitere Versuche übrig -> Warten und fortsetzen.
+                println!("⚠️ Versuch {}/{}: API fehlgeschlagen. Warte {}s...", attempt, max_retries, delay.as_secs_f32());
+                sleep(delay).await;
+
+                // Zähler erhöhen und die `loop` startet automatisch den nächsten Versuch
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn is_transient_error(e: &anyhow::Error) -> bool {
+    // Versuche, den Fehler in einen reqwest::Error umzuwandeln
+    if let Some(reqwest_error) = e.downcast_ref::<reqwest::Error>() {
+        // Prüfe auf HTTP Status Code Fehler
+        if let Some(status) = reqwest_error.status() {
+            return status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+        }
+
+        // Prüfe auf Netzwerkfehler/Timeouts
+        return reqwest_error.is_timeout() || reqwest_error.is_connect();
+    }
+
+    // Wenn es kein reqwest-Fehler ist oder der Typ unbekannt ist, behandeln wir ihn als fatal
+    false
 }
