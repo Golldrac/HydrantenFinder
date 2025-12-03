@@ -1,10 +1,9 @@
 use crate::models::Location;
 use anyhow::Result;
-use image::{EncodableLayout, GenericImageView};
+use image::GenericImageView;
 use indicatif::{ProgressBar, ProgressStyle};
 use minifb::{Key, Window, WindowOptions};
 use std::path::Path;
-use std::time::Duration;
 use windows::Devices::Geolocation::{
     Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
 };
@@ -22,8 +21,8 @@ const TIMEOUT_DURATION_NANOS: i64 = 5 * DURATION_FACTOR;
 
 /// Der Skalierungsfaktor, der auf das geladene Bild angewendet wird.
 ///
-/// Ein Wert unter 1.0 bewirkt ein **Herauszoomen** (Bild wird verkleinert, um auf den Bildschirm zu passen),
-/// während ein Wert über 1.0 ein **Hineinzoomen** bewirkt.
+/// Ein Wert unter 1.0 bewirkt ein Herauszoomen (Bild wird verkleinert, um auf den Bildschirm zu passen),
+/// während ein Wert über 1.0 ein Hineinzoomen bewirkt.
 const SCALE_FACTOR: f32 = 0.6;
 
 /// Ruft die aktuellen geographischen Koordinaten des Benutzers über die Windows Geolocation API ab.
@@ -35,7 +34,8 @@ const SCALE_FACTOR: f32 = 0.6;
 /// Gibt einen Fehler zurück, wenn:
 /// * Der Standortzugriff in den Windows-Einstellungen verweigert wurde.
 /// * Die Windows API einen Fehler zurückgibt (z.B. Timeout oder interner Fehler).
-pub async fn get_user_coordinates() -> anyhow::Result<Location> {
+pub async fn get_user_coordinates() -> Result<Location> {
+    // ... (Funktionsimplementierung unverändert)
     let access_status = Geolocator::RequestAccessAsync()?.await?;
 
     match access_status {
@@ -74,7 +74,7 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
 /// Lädt ein Bild von einem Pfad, skaliert es (entsprechend `SCALE_FACTOR`)
 /// und zeigt es in einem `minifb`-Fenster an.
 ///
-/// Während der Lade- und Konvertierungsphase wird ein **Konsolen-Spinner** angezeigt.
+/// Während der Lade- und Konvertierungsphase wird ein Konsolen-Spinner angezeigt.
 ///
 /// # Arguments
 ///
@@ -85,6 +85,7 @@ pub async fn get_user_coordinates() -> anyhow::Result<Location> {
 /// Gibt einen Fehler zurück, wenn das Bild nicht geladen/dekodiert werden kann oder
 /// `minifb`-Operationen fehlschlagen.
 pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
+    // ... (Funktionsimplementierung unverändert)
     // 1. Spinner initialisieren
     let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}")?;
     let pb = ProgressBar::new_spinner();

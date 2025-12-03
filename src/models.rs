@@ -1,26 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-
-/// --- API / Overpass Structs ---
+// --- API / Overpass Structs ---
 
 /// Repräsentiert die gesamte JSON-Antwort von der Overpass API.
 #[derive(Debug, Deserialize)]
 pub struct LocationResponse {
     /// Die Liste der von Overpass gefundenen geographischen Elemente (z.B. Hydranten).
-    pub elements: Vec<Location>,
+    pub elements: Vec<Hydrant>,
 }
 
-
-/// --- API / OSRM Structs ---
+// --- API / OSRM Structs ---
 
 /// Repräsentiert die Geometrie eines GeoJSON-Objekts (verwendet von ORS und OSRM).
 #[derive(Debug, Deserialize)]
 pub struct GeoJsonGeometry {
-    /// Die Liste der Koordinatenpunkte der Geometrie (Array von [Länge, Breite]-Paaren).
+    /// Die Liste der Koordinatenpunkte der Geometrie (Array von \[Länge, Breite]-Paaren).
     pub coordinates: Vec<Vec<f64>>,
-    /// Der Typ der GeoJSON-Geometrie (z.B. "LineString").
-    #[serde(rename = "type")]
-    pub geo_type: String,
 }
 
 /// Repräsentiert ein einzelnes Segment (Leg) einer Route in der OSRM-Antwort.
@@ -46,8 +41,7 @@ pub struct OSRMResponse {
     pub routes: Vec<Route>,
 }
 
-
-/// --- API / OpenRouteService (ORS) Structs ---
+// --- API / OpenRouteService (ORS) Structs ---
 
 /// Eine Zusammenfassung der Routendetails in der ORS-Antwort.
 #[derive(Debug, Deserialize)]
@@ -79,111 +73,7 @@ pub struct ORSResponse {
     pub features: Vec<ORSFeature>,
 }
 
-
-/// --- Interne / Gemeinsame Datenstrukturen ---
-
-/// Repräsentiert eine geographische Position (Breite und Länge).
-///
-/// Wird für die Position des Benutzers und die Position des Hydranten verwendet.
-/// Die Felder werden für die Serialisierung/Deserialisierung mit Overpass (`lon`/`lat`) angepasst.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Location {
-    /// Die Länge (Longitude) der Position. Wird von `serde` von "lon" umbenannt.
-    #[serde(rename = "lon")]
-    pub longitude: f64,
-    /// Die Breite (Latitude) der Position. Wird von `serde` von "lat" umbenannt.
-    #[serde(rename = "lat")]
-    pub latitude: f64,
-    /// Optionale Tags, falls die Position ein OSM-Element mit Tags (wie ein Hydrant) ist.
-    #[serde(rename = "tags")]
-    pub tags: Option<HydrantTags>,
-}
-
-/// Details einer berechneten Route zwischen zwei Punkten.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RouteDetails {
-    /// Die berechnete Distanz der Route in Metern (z.B. Fußweglänge).
-    pub distance_meters: f64,
-    /// Die Route selbst, kodiert als Polyline String (z.B. für Stadia Maps). Kann leer sein, wenn Fallback auf Haversine.
-    pub geometry_polyline: String,
-}
-
-/// Repräsentiert die Form (Bauart) des Hydranten.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub enum HydrantShape {
-    #[serde(rename = "pipe")]
-    Pipe,
-    #[serde(rename = "pillar")]
-    Pillar, // Überflurhydrant
-    #[serde(rename = "underground")]
-    Underground, // Unterflurhydrant
-    #[serde(rename = "wall")]
-    Wall,
-}
-
-impl HydrantShape {
-    /// Liefert die benutzerfreundliche, deutsche Beschreibung der Form.
-    pub fn to_display_name(&self) -> &'static str {
-        match self {
-            HydrantShape::Pipe => "Rohrhydrant",
-            HydrantShape::Pillar => "Überflurhydrant",
-            HydrantShape::Wall => "Wandhydrant",
-            HydrantShape::Underground => "Unterflurhydrant",
-        }
-    }
-}
-
-/// Repräsentiert die genaue Position des Hydranten im Straßenraum.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub enum HydrantPosition {
-    #[serde(rename = "green")]
-    Green, // Grünfläche
-    #[serde(rename = "lane")]
-    Lane, // Straße
-    #[serde(rename = "parking_lot")]
-    ParkingLot, // Parkplatz
-    #[serde(rename = "sidewalk")]
-    Sidewalk, // Gehweg
-}
-
-impl HydrantPosition {
-    /// Liefert die benutzerfreundliche, deutsche Beschreibung der Position.
-    pub fn to_display_name(&self) -> &'static str {
-        match self {
-            HydrantPosition::Green => "Grünfläche",
-            HydrantPosition::Lane => "Straße",
-            HydrantPosition::ParkingLot => "Parkplatz",
-            HydrantPosition::Sidewalk => "Gehweg",
-        }
-    }
-}
-
-/// Die von der Overpass API zurückgegebenen Tags für einen Hydranten.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct HydrantTags {
-    /// Die Bauart des Hydranten (`fire_hydrant:type`).
-    #[serde(rename = "fire_hydrant:type")]
-    pub shape: Option<HydrantShape>,
-
-    /// Die genaue Position im Straßenraum (`fire_hydrant:position`).
-    #[serde(rename = "fire_hydrant:position")]
-    pub position: Option<HydrantPosition>,
-
-    /// Der Durchmesser des Hydrantenrohres in Millimetern (`fire_hydrant:diameter`).
-    #[serde(rename = "fire_hydrant:diameter")]
-    pub diameter: Option<String>,
-}
-
-/// Ein Hydrant, der nach seiner Routendistanz zum Benutzer gerankt wurde.
-#[derive(Debug, Clone)]
-pub struct RankedHydrant {
-    /// Die geographische Position des Hydranten.
-    pub hydrant: Location,
-    /// Die Routendetails vom Benutzer zu diesem Hydranten.
-    pub route_details: RouteDetails,
-}
-
-/// --- API / Stadia Maps Static Map Request Structs ---
+// --- API / Stadia Maps Static Map Request Structs ---
 
 /// Repräsentiert einen einzelnen Marker (Punkt) auf der statischen Karte.
 #[derive(Debug, Serialize, Clone)]
@@ -230,9 +120,107 @@ pub struct MapRequest {
     pub markers: Vec<MapMarker>,
 }
 
+// --- Interne / Gemeinsame Datenstrukturen ---
+
+/// Repräsentiert eine geographische Position (Breite und Länge).
+///
+/// Wird für die Position des Benutzers oder eines Hydranten verwendet.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Location {
+    /// Die Länge (Longitude) der Position.
+    #[serde(rename = "lon")]
+    pub longitude: f64,
+    /// Die Breite (Latitude) der Position.
+    #[serde(rename = "lat")]
+    pub latitude: f64,
+}
+
+/// Repräsentiert einen Hydranten, abgeleitet von `Location`, aber mit zusätzlichen OSM-Tags.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Hydrant {
+    /// Die Länge (Longitude) der Position.
+    #[serde(rename = "lon")]
+    pub longitude: f64,
+    /// Die Breite (Latitude) der Position.
+    #[serde(rename = "lat")]
+    pub latitude: f64,
+    /// Optionale Tags des Hydranten, die von Overpass geliefert werden.
+    #[serde(rename = "tags")]
+    pub tags: Option<HydrantTags>,
+}
+
+/// Die von der Overpass API zurückgegebenen Tags für einen Hydranten.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HydrantTags {
+    /// Die Bauart des Hydranten (`fire_hydrant:type`).
+    #[serde(rename = "fire_hydrant:type")]
+    pub shape: Option<HydrantShape>,
+
+    /// Die genaue Position im Straßenraum (`fire_hydrant:position`).
+    #[serde(rename = "fire_hydrant:position")]
+    pub position: Option<HydrantPosition>,
+
+    /// Der Durchmesser des Hydrantenrohres in Millimetern (`fire_hydrant:diameter`).
+    #[serde(rename = "fire_hydrant:diameter")]
+    pub diameter: Option<String>,
+
+    /// Die Anzahl der verfügbaren Kupplungen (`fire_hydrant:couplings`).
+    #[serde(rename = "fire_hydrant:couplings")]
+    pub couplings: Option<String>,
+}
+
+/// Details einer berechneten Route zwischen zwei Punkten.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RouteDetails {
+    /// Die berechnete Distanz der Route in Metern (z.B. Fußweglänge).
+    pub distance_meters: f64,
+    /// Die Route selbst, kodiert als Polyline String (z.B. für Stadia Maps). Kann leer sein, wenn Fallback auf Haversine.
+    pub geometry_polyline: String,
+}
+
+/// Ein Hydrant, der nach seiner Routendistanz und Eigenschaften gerankt wurde.
+#[derive(Debug, Clone)]
+pub struct RankedHydrant {
+    /// Die geographische Position des Hydranten.
+    pub hydrant: Hydrant,
+    /// Die Routendetails vom Benutzer zu diesem Hydranten.
+    pub route_details: RouteDetails,
+    /// Der berechnete Score für die Rangliste (kleiner ist besser).
+    pub score: f64,
+}
+
+// --- Enums ---
+
+/// Repräsentiert die Form (Bauart) des Hydranten (`fire_hydrant:type`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum HydrantShape {
+    #[serde(rename = "pipe")]
+    Pipe,
+    #[serde(rename = "pillar")]
+    Pillar, // Überflurhydrant
+    #[serde(rename = "underground")]
+    Underground, // Unterflurhydrant
+    #[serde(rename = "wall")]
+    Wall,
+}
+
+/// Repräsentiert die genaue Position des Hydranten im Straßenraum (`fire_hydrant:position`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub enum HydrantPosition {
+    #[serde(rename = "green")]
+    Green, // Grünfläche
+    #[serde(rename = "lane")]
+    Lane, // Straße
+    #[serde(rename = "parking_lot")]
+    ParkingLot, // Parkplatz
+    #[serde(rename = "sidewalk")]
+    Sidewalk, // Gehweg
+}
+
+// --- Impl-Blöcke ---
 
 impl Location {
-    /// Erstellt eine neue `Location` Instanz ohne Hydranten-Tags.
+    /// Erstellt eine neue `Location` Instanz.
     ///
     /// # Arguments
     ///
@@ -242,14 +230,114 @@ impl Location {
         Location {
             longitude: lon,
             latitude: lat,
-            tags: None,
         }
     }
+}
 
+impl RankedHydrant {
+    /// Erstellt eine neue `RankedHydrant` Instanz und berechnet sofort den Score.
+    ///
+    /// # Arguments
+    ///
+    /// * `hydrant` - Der Hydrant.
+    /// * `route_details` - Die berechneten Routendetails.
+    pub fn new(hydrant: Hydrant, route_details: RouteDetails) -> Self {
+        let mut ranked = RankedHydrant {
+            hydrant,
+            route_details,
+            score: 0.0, // Temporärer Wert
+        };
+        ranked.score = ranked.calculate_score();
+        ranked
+    }
+
+    /// Berechnet den Score des Hydranten. Ein niedrigerer Score ist besser.
+    ///
+    /// Der Score gewichtet:
+    /// 1. Route/Distanz (quadratisch): Hoher Einfluss, um kurze Strecken zu favorisieren.
+    /// 2. Durchmesser: Kleiner Durchmesser (z.B. < 150mm) erhöht den Score (schlechter).
+    /// 3. Typ (Shape): Überflurhydrant (`Pillar`) ist am besten (negativer Score-Add).
+    /// 4. Position: Parkplatz/Grünfläche sind schlechter als Straße/Gehweg.
+    /// 5. Kupplungen: Mehr als 1 Kupplung ist besser (negativer Score-Add).
+    fn calculate_score(&self) -> f64 {
+        // Standarddurchmesser, wenn Tag fehlt
+        let diameter = if let Some(tags) = &self.hydrant.tags {
+            if let Some(dia_str) = &tags.diameter {
+                // Parse-Fehler ignorieren und Standardwert (80.0mm) verwenden
+                dia_str.parse::<f64>().unwrap_or(80.0)
+            } else {
+                80.0
+            }
+        } else {
+            80.0
+        };
+
+        // Score-Anpassung basierend auf der Bauart
+        let type_add = if let Some(tags) = &self.hydrant.tags {
+            match tags.shape {
+                Some(HydrantShape::Pillar) => -50.0,      // Bester Typ (Überflur)
+                Some(HydrantShape::Pipe) => 30.0,
+                Some(HydrantShape::Wall) => 100.0,
+                Some(HydrantShape::Underground) => 0.0,
+                None => 0.0,
+            }
+        } else {
+            0.0
+        };
+
+        // Score-Anpassung basierend auf der Position
+        let position_add = if let Some(tags) = &self.hydrant.tags {
+            match tags.position {
+                Some(HydrantPosition::Lane) => 0.0,
+                Some(HydrantPosition::Sidewalk) => 0.0,
+                Some(HydrantPosition::ParkingLot) => 30.0, // Schlechter (Zufahrt/Zugriff)
+                Some(HydrantPosition::Green) => 10.0,     // Etwas schlechter (Gelände)
+                None => 5.0,
+            }
+        } else {
+            5.0
+        };
+
+        // Score-Anpassung basierend auf der Anzahl der Kupplungen
+        let couplings_add = if let Some(tags) = &self.hydrant.tags {
+            if let Some(coup_str) = &tags.couplings {
+                let coup_f = coup_str.parse::<i8>().unwrap_or(1);
+                if coup_f >= 2 {
+                    -30.0 // Besser
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        // Hauptformel: Distanz (quadratisch gewichtet) + Durchmesser-Einfluss + Typ/Position/Kupplungen
+        ((self.route_details.distance_meters / 100.0).powi(2) * 50.0)
+            + ((150.0 / diameter) * 100.0)
+            + type_add
+            + position_add
+            + couplings_add
+    }
+}
+
+impl HydrantShape {
+    /// Liefert die benutzerfreundliche, deutsche Beschreibung der Form.
+    pub fn to_display_name(&self) -> &'static str {
+        match self {
+            HydrantShape::Pipe => "Rohrhydrant",
+            HydrantShape::Pillar => "Überflurhydrant",
+            HydrantShape::Wall => "Wandhydrant",
+            HydrantShape::Underground => "Unterflurhydrant",
+        }
+    }
 }
 
 impl HydrantTags {
-    pub fn output(&self){
+    /// Gibt die bekannten Eigenschaften des Hydranten auf der Konsole aus.
+    pub fn output(&self) {
         if let Some(shape) = &self.shape {
             println!("🧯 Es handelt sich um einen {}", shape.to_display_name());
         }
@@ -258,13 +346,15 @@ impl HydrantTags {
         }
         if let Some(position) = &self.position {
             match position {
-                HydrantPosition::Green => println!("🧯 Der Hydrant befindet sich auf sich einer Grünfläche."),
+                HydrantPosition::Green => println!("🧯 Der Hydrant befindet sich auf einer Grünfläche."),
                 HydrantPosition::Lane => println!("🧯 Der Hydrant befindet sich auf der Straße."),
                 HydrantPosition::ParkingLot => println!("🧯 Der Hydrant befindet sich auf einem Parkplatz."),
                 HydrantPosition::Sidewalk => println!("🧯 Der Hydrant befindet sich auf dem Gehweg."),
             }
         }
 
+        if let Some(couplings) = &self.couplings {
+            println!("🧯 Der Hydrant hat {} Kupplung(en).", couplings);
+        }
     }
-
 }
