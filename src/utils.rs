@@ -102,7 +102,7 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
 
     // Skaliere das Bild auf die neue Größe (Herauszoomen).
     let resized_img =
-        img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3);
+        img.resize_exact(new_width, new_height, image::imageops::FilterType::Nearest);
 
     // Abmessungen des *skalierten* Bildes abrufen
     let width = resized_img.width() as usize;
@@ -136,7 +136,6 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
         // Berechne den Index im flachen Puffer
         let index = (y as usize) * width + (x as usize);
         buffer[index] = color;
-        pb.inc(1);
     }
 
     pb.finish();

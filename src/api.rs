@@ -3,7 +3,6 @@ use std::env;
 use std::f64::consts::PI;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use geo::{Distance, Haversine, Point};
@@ -11,10 +10,10 @@ use geo_types::Coord;
 use indicatif::{ProgressBar, ProgressStyle};
 use polyline;
 use rand::Rng;
-use reqwest::{self, StatusCode};
+use reqwest::{self, Client, StatusCode};
 use serde_json;
 use tokio::task;
-use tokio::time::sleep;
+use tokio::time::{self, sleep, Duration};
 
 use crate::models::{
     Hydrant, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse,
@@ -42,7 +41,8 @@ const MAX_ZOOM: u32 = 18;
 /// # Arguments
 ///
 /// * `location` - Die Startposition.
-/// * `initial_radius_m` - Der anfängliche Suchradius in Metern.
+/// * `initial_radius_m` - Der anfängliche Suchradius in Metern (z.B. 500m).
+/// * `client` - Ein geteilter reqwest Client.
 ///
 /// # Returns
 ///
@@ -51,7 +51,7 @@ const MAX_ZOOM: u32 = 18;
 /// # Errors
 ///
 /// Gibt einen Fehler zurück, wenn die Overpass API nach allen Retries einen nicht erfolgreichen Statuscode zurückgibt.
-pub async fn find_hydrants(location: &Location, initial_radius_m: u32) -> Result<Vec<Hydrant>> {
+pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &Client) -> Result<Vec<Hydrant>> {
     // ... (Funktionsimplementierung unverändert)
     let lat = location.latitude;
     let lon = location.longitude;
@@ -70,8 +70,6 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32) -> Result
         );
 
         let url = "https://overpass-api.de/api/interpreter";
-
-        let client = reqwest::Client::new();
 
         let response = retry_on_failure(
             || {
@@ -93,8 +91,8 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32) -> Result
                         .map_err(anyhow::Error::from)
                 }
             },
-            2, // Max. 2 Versuche (1. Versuch + 1 Retry)
-            Duration::from_secs(2),
+            4,
+            Duration::from_secs(3),
         )
             .await;
 
@@ -140,13 +138,14 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32) -> Result
 
 /// Ruft die nächstgelegenen Hydranten (Luftlinie) ab.
 ///
-/// Die Hydranten werden zuerst über `find_hydrants` gesucht (aktuell mit festem Radius von 500m),
+/// Die Hydranten werden zuerst über `find_hydrants` gesucht (aktuell mit festem Startradius von 500m),
 /// dann nach Haversine-Distanz sortiert und auf die gewünschte Anzahl begrenzt.
 ///
 /// # Arguments
 ///
 /// * `location` - Die Startposition des Benutzers.
 /// * `amount` - Die maximale Anzahl der zurückzugebenden Hydranten (Standard: 5).
+/// * `client` - Ein geteilter reqwest Client.
 ///
 /// # Returns
 ///
@@ -158,13 +157,14 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32) -> Result
 pub async fn get_nearest_hydrants(
     location: &Location,
     amount: Option<usize>,
+    client: &Client
 ) -> Result<Vec<Hydrant>> {
     // ... (Funktionsimplementierung unverändert)
     let max_len = amount.unwrap_or(5);
     // Reduzierter Radius auf 500m, da die Routenberechnung parallel erfolgt und sonst zu lange dauern könnte
     let radius_m = 500;
 
-    let hydrant_locations = find_hydrants(location, radius_m)
+    let hydrant_locations = find_hydrants(location, radius_m, client)
         .await
         .context("Fehler beim Abruf der Hydranten")?;
 
@@ -216,7 +216,7 @@ pub async fn get_nearest_hydrants(
 ///
 /// Die `RouteDetails` der berechneten Route, oder ein Fallback auf ORS.
 pub async fn fetch_route_osrm(
-    client: &reqwest::Client,
+    client: &Client,
     start: &Location,
     destination: &Hydrant,
 ) -> Result<RouteDetails> {
@@ -297,6 +297,7 @@ pub async fn fetch_route_osrm(
 /// ORS dient als Fallback für OSRM und erfordert einen API-Schlüssel (`ORS_API_KEY`).
 /// Führt interne Retries bei transienten Fehlern durch. Meldet ORS eine 0m-Route,
 /// wird die Haversine-Distanz (Luftlinie) als Fallback zurückgegeben (falls > 10m).
+/// Wichtig: Bei Fallback auf Luftlinie wird `geometry_polyline` leer zurückgegeben.
 ///
 /// # Arguments
 ///
@@ -309,7 +310,7 @@ pub async fn fetch_route_osrm(
 /// Gibt einen Fehler zurück, wenn die `ORS_API_KEY` Umgebungsvariable fehlt oder
 /// die API nach allen Retries einen Fehlerstatus zurückgibt.
 pub async fn fetch_route_ors(
-    client: &reqwest::Client,
+    client: &Client,
     start: &Location,
     destination: &Hydrant,
 ) -> Result<RouteDetails> {
@@ -429,12 +430,16 @@ pub async fn fetch_route_ors(
 ///
 /// Optimierung: Wenn der Hydrant, der per Luftlinie am nächsten liegt,
 /// bereits innerhalb des `PROXIMITY_THRESHOLD_METERS` (5m) liegt, wird sofort diese Position
-/// ohne Routenberechnung als gültiger, gerankter Hydrant hinzugefügt.
+/// ohne Routenberechnung als gültiger, gerankter Hydrant hinzugefügt (diese wird nicht von der Task-Timeout-Logik beeinflusst).
+///
+/// Timeout: Wenn die Berechnung aller Routen länger als 5 Sekunden dauert, wird mit den bis dahin
+/// gefundenen Routen fortgefahren, sofern mindestens 3 Ergebnisse vorliegen. Andernfalls wird ein Fehler zurückgegeben.
 ///
 /// # Arguments
 ///
 /// * `user_location` - Die Startposition des Benutzers.
 /// * `candidate_hydrants` - Eine Liste von Hydranten, die in Betracht gezogen werden sollen (typischerweise die nach Luftlinie nächsten).
+/// * `client` - Ein geteilter reqwest Client.
 ///
 /// # Returns
 ///
@@ -442,10 +447,11 @@ pub async fn fetch_route_ors(
 ///
 /// # Errors
 ///
-/// Gibt einen Fehler zurück, wenn keine gültige Route zu einem der Hydranten gefunden werden konnte.
+/// Gibt einen Fehler zurück, wenn keine gültige Route zu einem der Hydranten gefunden werden konnte oder das Timeout mit zu wenigen Ergebnissen ($<3$) überschritten wird.
 pub async fn get_closest_by_route(
     user_location: &Location,
     candidate_hydrants: &[Hydrant],
+    client: &Client
 ) -> Result<Vec<RankedHydrant>> {
     // ... (Funktionsimplementierung unverändert)
     if candidate_hydrants.is_empty() {
@@ -462,10 +468,6 @@ pub async fn get_closest_by_route(
     pb.set_style(spinner_style);
     pb.set_message("🧭 Berechne Routen zu Hydranten...");
     pb.enable_steady_tick(Duration::from_millis(100));
-
-    let client = reqwest::Client::builder()
-        .user_agent("HydrantenFinder/1.0")
-        .build()?;
 
     let all_ranked_hydrants_arc: Arc<Mutex<Vec<RankedHydrant>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -522,13 +524,42 @@ pub async fn get_closest_by_route(
         join_handles.push(handle);
     }
 
-    // Warten Sie asynchron auf den Abschluss aller Tasks
-    for handle in join_handles {
-        // `await?` prüft auf Paniken in der Task
-        handle.await?;
-    }
+    let timeout_duration = Duration::from_secs(5);
 
-    // Die Progress Bar beenden
+    match time::timeout(timeout_duration, async {
+        for handle in join_handles {
+            // await? prüft auf Paniken in der Task (keine Routen-API-Fehler)
+            handle.await?;
+        }
+        // Der innere Result ist Ok, wenn alle Handles fehlerfrei fertig wurden.
+        Ok(()) as Result<()>
+    }).await {
+        // 1. Timeout abgelaufen
+        Err(e) => {
+            pb.println(format!("⚠️ Timeout nach {}s. Routenberechnung nicht komplett.", timeout_duration.as_secs()));
+            // Überprüfung: Genug Ergebnisse gesammelt?
+            let num_results = all_ranked_hydrants_arc.lock().unwrap().len();
+
+            if num_results < 3 {
+                // Fehlerausgabe, wenn zu wenige Ergebnisse vorliegen
+                pb.finish();
+                return Err(anyhow::anyhow!("Route-Berechnung konnte nicht rechtzeitig mindestens 3 Hydranten liefern (nur {})", num_results).context(e));
+            }
+
+            println!("2 < Hydranten < 5")
+            // Ansonsten: Mit den vorhandenen Ergebnissen (num_results >= 3) fortfahren
+        }
+        // 2. Fehler in einer Task (z.B. Panik)
+        Ok(Err(e)) => {
+            pb.finish();
+            return Err(e);
+        }
+        // 3. Alles erfolgreich und rechtzeitig abgeschlossen
+        Ok(Ok(_)) => {
+            // Kein Timeout, alle 5 Hydranten sind berechnet worden.
+        }
+    };
+
     pb.finish();
 
     // Die gesammelten Ergebnisse aus dem Mutex extrahieren
@@ -567,6 +598,7 @@ pub async fn get_closest_by_route(
 /// Gibt einen Fehler zurück, wenn die `STADIAMAPS_API_KEY` Umgebungsvariable fehlt oder
 /// die API nach allen Retries einen Fehlerstatus zurückgibt.
 pub async fn get_map(
+    client: &Client,
     user: &Location,
     hydrant: &RankedHydrant,
     width: u32,
@@ -622,8 +654,6 @@ pub async fn get_map(
         "https://tiles.stadiamaps.com/static_cacheable/alidade_smooth.png?api_key={}",
         api_key
     );
-
-    let client = reqwest::Client::new();
 
     let response = retry_on_failure(
         || {
@@ -801,16 +831,23 @@ where
 fn is_transient_error(e: &anyhow::Error) -> bool {
     // Versuche, den Fehler in einen reqwest::Error umzuwandeln
     if let Some(reqwest_error) = e.downcast_ref::<reqwest::Error>() {
-        // Prüfe auf HTTP Status Code Fehler
+        // 1. Prüfe auf HTTP Status Code Fehler (5xx Server-Fehler, 429 Rate Limit)
         if let Some(status) = reqwest_error.status() {
-            // Einheitliche Fehler-Prüfung
             return status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         }
 
-        // Prüfe auf Netzwerkfehler/Timeouts
-        return reqwest_error.is_timeout() || reqwest_error.is_connect();
+        // 2. Prüfe auf spezielle Netzwerk- und Timeout-Fehler
+        if reqwest_error.is_timeout() || reqwest_error.is_connect() {
+            return true;
+        }
+
+        // Wenn es ein request-Fehler ist, aber keiner der oben genannten (z.B. DNS-Fehler, aber kein Timeout),
+        // betrachten wir ihn auch als transient, um es in diesem Kontext einfacher zu halten.
+        if reqwest_error.is_request() {
+            return true;
+        }
     }
 
-    // Wenn es kein reqwest-Fehler ist oder der Typ unbekannt ist, behandeln wir ihn als fatal
+    // Standardmäßig nicht transient
     false
 }

@@ -2,6 +2,8 @@ mod api;
 mod models;
 mod utils;
 
+use std::time::Duration;
+
 use anyhow::Result;
 use dotenvy::dotenv;
 use tokio::fs::File;
@@ -19,7 +21,13 @@ async fn main() -> Result<()> {
     // Umgebungsvariablen aus .env laden
     dotenv().ok();
 
+    let client = reqwest::Client::builder()
+        .user_agent("HydrantenFinder/1.0")
+        .timeout(Duration::from_secs(30))
+        .build()?;
+
     // 1. Benutzerkoordinaten abrufen
+
     let user_location = utils::get_user_coordinates().await?;
     println!(
         "📍 Standort gefunden: Breite={}, Länge={}.",
@@ -28,7 +36,7 @@ async fn main() -> Result<()> {
 
     // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
     // Der Radius (500m) ist in api::get_nearest_hydrants fest codiert.
-    let hydrants = api::get_nearest_hydrants(&user_location, Some(5)).await?;
+    let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
 
     if hydrants.is_empty() {
         println!("🔍 Keine Hydranten in der Nähe gefunden. Das Programm wird beendet.");
@@ -36,7 +44,7 @@ async fn main() -> Result<()> {
     }
 
     // 3. Den am besten bewerteten Hydranten per Route (Fußweg) ermitteln und ranken
-    let ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants).await?;
+    let ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
     let best_hydrant = &ranked_hydrants[0];
 
     // Ausgabe der besten Route
@@ -52,13 +60,15 @@ async fn main() -> Result<()> {
     }
 
     // 4. Statische Karte erstellen und speichern
-    let map_bytes = api::get_map(&user_location, &best_hydrant, 800, 600).await?;
     let file_path = "hydrant_route.png";
+    let map_bytes = api::get_map(&client, &user_location, &best_hydrant, 800, 600).await?;
     let mut file = File::create(file_path).await?;
     file.write_all(&map_bytes).await?;
 
-    // 5. Karte öffnen
-    utils::show_image_in_minifb(&file_path)?;
+    // Starte die Anzeige in einer blockierenden Task
+    tokio::task::spawn_blocking(move || {
+        utils::show_image_in_minifb(file_path)
+    }).await??;
 
     Ok(())
 }
