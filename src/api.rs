@@ -127,8 +127,7 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &
 
         }
 
-        let jitter = Duration::from_millis(rand::rng().random_range(0..500));
-        let delay = base_delay * (2_i32.pow(attempt) as u32) + jitter;
+        let delay = base_delay * (2_i32.pow(attempt) as u32);
         radius_m = min(initial_radius_m * (2_i32.pow(attempt) as u32), MAX_RADIUS);
         sleep(delay).await;
         attempt += 1;
@@ -495,7 +494,9 @@ pub async fn get_closest_by_route(
                 },
             );
 
-            all_ranked_hydrants_arc.lock().unwrap().push(candidate);
+            all_ranked_hydrants_arc.lock()
+                .expect("Mutex der Ergebnisse ist vergiftet (Poisoned). Ein anderer Thread ist abgestürzt.")
+                .push(candidate);
             pb_clone.inc(1);
             continue;
         }
@@ -538,7 +539,9 @@ pub async fn get_closest_by_route(
         Err(e) => {
             pb.println(format!("⚠️ Timeout nach {}s. Routenberechnung nicht komplett.", timeout_duration.as_secs()));
             // Überprüfung: Genug Ergebnisse gesammelt?
-            let num_results = all_ranked_hydrants_arc.lock().unwrap().len();
+            let num_results = all_ranked_hydrants_arc.lock()
+                .expect("Mutex der Ranglisten-Hydranten ist vergiftet beim Abrufen der Anzahl (len).")
+                .len();
 
             if num_results < 3 {
                 // Fehlerausgabe, wenn zu wenige Ergebnisse vorliegen
@@ -563,7 +566,10 @@ pub async fn get_closest_by_route(
     pb.finish();
 
     // Die gesammelten Ergebnisse aus dem Mutex extrahieren
-    let mut sorted_hydrants = all_ranked_hydrants_arc.lock().unwrap().drain(..).collect::<Vec<RankedHydrant>>();
+    let mut sorted_hydrants = all_ranked_hydrants_arc.lock()
+        .expect("Mutex der Ranglisten-Hydranten ist vergiftet beim Entleeren (drain) der Ergebnisse.")
+        .drain(..)
+        .collect::<Vec<RankedHydrant>>();
 
     if sorted_hydrants.is_empty() {
         anyhow::bail!("❌ Keine Routen zu Hydranten gefunden, auch nicht per Fallback.");
