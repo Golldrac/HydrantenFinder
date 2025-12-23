@@ -226,10 +226,10 @@ impl Location {
     ///
     /// * `lon` - Die Länge (Longitude).
     /// * `lat` - Die Breite (Latitude).
-    pub fn new(lon: f64, lat: f64) -> Self {
+    pub fn new(lat: f64, lon: f64) -> Self {
         Location {
-            longitude: lon,
             latitude: lat,
+            longitude: lon,
         }
     }
 }

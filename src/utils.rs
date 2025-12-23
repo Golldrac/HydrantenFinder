@@ -4,11 +4,17 @@ use image::GenericImageView;
 use indicatif::{ProgressBar, ProgressStyle};
 use minifb::{Key, Window, WindowOptions};
 use std::path::Path;
+use dotenvy::dotenv;
 use windows::Devices::Geolocation::{
     Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
 };
 use windows::Foundation::TimeSpan;
 use windows_future::IAsyncOperation;
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, GetConsoleMode, SetConsoleMode,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE
+};
 
 /// Konvertiert Sekunden in die 100-Nanosekunden-Einheit, die für `TimeSpan::Duration` benötigt wird.
 const DURATION_FACTOR: i64 = 10_000_000; // 1 Sekunde = 10 Millionen * 100ns
@@ -34,6 +40,7 @@ const SCALE_FACTOR: f32 = 0.6;
 /// Gibt einen Fehler zurück, wenn:
 /// * Der Standortzugriff in den Windows-Einstellungen verweigert wurde.
 /// * Die Windows API einen Fehler zurückgibt (z.B. Timeout oder interner Fehler).
+
 pub async fn get_user_coordinates() -> Result<Location> {
     // ... (Funktionsimplementierung unverändert)
     let access_status = Geolocator::RequestAccessAsync()?.await?;
@@ -41,7 +48,7 @@ pub async fn get_user_coordinates() -> Result<Location> {
     match access_status {
         GeolocationAccessStatus::Allowed => {
             let geolocator = Geolocator::new()?;
-            geolocator.SetDesiredAccuracy(PositionAccuracy::Default)?;
+            geolocator.SetDesiredAccuracy(PositionAccuracy::High)?;
 
             let max_age = TimeSpan {
                 Duration: MAX_AGE_DURATION_NANOS,
@@ -56,7 +63,7 @@ pub async fn get_user_coordinates() -> Result<Location> {
             let geoposition = operation.await?;
             let geocoordinate: Geocoordinate = geoposition.Coordinate()?;
 
-            let loc = Location::new(geocoordinate.Longitude()?, geocoordinate.Latitude()?);
+            let loc = Location::new(geocoordinate.Latitude()?, geocoordinate.Longitude()?);
 
             Ok(loc)
         }
@@ -164,4 +171,34 @@ pub(crate) fn show_image_in_minifb(file_path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Initialisiert die Anwendung (Umgebungsvariablen und Terminal-Einstellungen)
+pub fn init_app() {
+    // 1. .env laden (Plattformunabhängig)
+    dotenv().ok();
+    // 2. Terminal konfigurieren
+    setup_terminal();
+}
+
+#[cfg(windows)]
+fn setup_terminal() {
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut mode = 0;
+        if GetConsoleMode(handle, &mut mode) != 0 {
+            // Aktiviert ANSI-Sequenzen für Farben und Emojis
+            let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+        // Setzt die Codepage auf UTF-8
+        let _ = std::process::Command::new("cmd")
+            .args(&["/c", "chcp 65001"])
+            .output();
+    }
+}
+
+#[cfg(not(windows))]
+fn setup_terminal() {
+    // Auf Linux/macOS ist in der Regel nichts zu tun,
+    // da UTF-8 und ANSI standardmäßig aktiv sind.
 }

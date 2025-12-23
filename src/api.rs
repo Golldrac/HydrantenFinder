@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::env;
-use std::f64::consts::PI;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -61,7 +60,7 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &
 
     loop {
         let query = format!(
-            r#"[out:json][timeout:60];
+            r#"[out:json][timeout:20];
             (
             node(around:{}, {}, {})[emergency=fire_hydrant];
             );
@@ -219,9 +218,8 @@ pub async fn fetch_route_osrm(
     start: &Location,
     destination: &Hydrant,
 ) -> Result<RouteDetails> {
-    // ... (Funktionsimplementierung unverändert)
     let url = format!(
-        "https://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=full",
+        "https://router.project-osrm.org/route/v1/foot/{},{};{},{}?steps=false&snapping=any&overview=full&geometries=polyline6",
         start.longitude, start.latitude, destination.longitude, destination.latitude
     );
 
@@ -395,7 +393,7 @@ pub async fn fetch_route_ors(
             let dest_point = Point::new(destination.longitude, destination.latitude);
             let haversine_dist = Haversine.distance(start_point, dest_point);
 
-            if haversine_dist > 10.0 {
+            if haversine_dist > 5.0 {
                 eprintln!(
                     "📐 Fallback: ORS-Route war 0m. Gebe Luftlinie ({:.2}m) zurück.",
                     haversine_dist
@@ -615,7 +613,7 @@ pub async fn get_map(
         .context("❌ STADIAMAPS_API_KEY Umgebungsvariable muss gesetzt sein. Kartenerstellung nicht möglich.")?;
 
     let hydrant_loc = &hydrant.hydrant;
-    let polyline_param = &hydrant.route_details.geometry_polyline;
+    let polyline_str = &hydrant.route_details.geometry_polyline;
     // Zoom-Level berechnen, damit beide Punkte sichtbar sind
     let zoom = calculate_zoom_level(user, hydrant_loc);
 
@@ -645,11 +643,11 @@ pub async fn get_map(
             },
         ],
         // Füge die Routen-Polyline nur hinzu, wenn sie existiert (nicht bei Haversine-Fallback)
-        lines: if polyline_param.is_empty() {
+        lines: if polyline_str.is_empty() {
             vec![]
         } else {
             vec![MapLine {
-                shape: polyline_param.clone(),
+                shape: polyline_str.clone(),
                 stroke_color: Some("red".to_string()),
                 stroke_width: Some(5),
             }]
@@ -730,24 +728,26 @@ pub async fn get_map(
 ///
 /// Der berechnete Zoomlevel als `u32`, begrenzt auf $0$ bis $18$.
 pub fn calculate_zoom_level(loc1: &Location, loc2: &Hydrant) -> u32 {
-    // ... (Funktionsimplementierung unverändert)
-    let mid_lat_rad = (loc1.latitude.to_radians() + loc2.latitude.to_radians()) / 2.0;
-    let max_lon_dist = (loc1.longitude - loc2.longitude).abs();
 
-    // Näherungsweise Berechnung der Meter pro Längengrad auf der mittleren Breite (basierend auf Erdradius)
-    let meters_per_lon_degree = 6371000.0 * 2.0 * PI * mid_lat_rad.cos() / 360.0;
-    let horizontal_distance_m = max_lon_dist * meters_per_lon_degree;
+    // Berechne die tatsächliche Distanz in Metern (Haversine)
+    let p1 = Point::new(loc1.longitude, loc1.latitude);
+    let p2 = Point::new(loc2.longitude, loc2.latitude);
+    let distance_m = Haversine.distance(p1, p2);
 
-    // Vermeide Logarithmus von Null bei gleicher Position
-    if horizontal_distance_m == 0.0 {
+    if distance_m <= PROXIMITY_THRESHOLD_METERS {
         return MAX_ZOOM;
     }
 
-    // Formel zur Abschätzung des Zoomlevels basierend auf der Distanz und der Kartenbreite
-    let zoom_factor = 450.0; // Faktor, der die Auflösung der Kachelgröße berücksichtigt
-    let zoom_f64 = MAP_WIDTH_PIXELS.log2() + (zoom_factor / horizontal_distance_m).log2();
+    let fraction_of_map = 0.4;
+    let meters_per_pixel = distance_m / (MAP_WIDTH_PIXELS * fraction_of_map);
 
-    let final_zoom = zoom_f64.floor() as u32;
+    // Standard-Formel für Web-Mercator-Projektion:
+    // Zoom = log2( (Erdumfang * cos(lat)) / (256 * meters_per_pixel) )
+    let mid_lat_rad = (loc1.latitude.to_radians() + loc2.latitude.to_radians()) / 2.0;
+    let earth_circumference = 40_075_016.7;
+    let zoom_f64 = (earth_circumference * mid_lat_rad.cos() / (256.0 * meters_per_pixel)).log2();
+
+    let final_zoom = zoom_f64.floor() as u32 -1;
 
     final_zoom.clamp(0, MAX_ZOOM)
 }

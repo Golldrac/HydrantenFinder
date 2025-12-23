@@ -5,12 +5,12 @@ mod utils;
 use std::time::Duration;
 
 use anyhow::Result;
-use dotenvy::dotenv;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use crate::utils::init_app;
 
 /// Hauptfunktion der Anwendung. Führt den gesamten Ablauf aus:
-/// 1. Laden der Umgebungsvariablen.
+/// 1. Initialisierung.
 /// 2. Abrufen des aktuellen Benutzerstandorts.
 /// 3. Suchen der nächstgelegenen Hydranten (Luftlinie).
 /// 4. Ermitteln und Ranken des schnellsten Hydranten per Route (Fußweg).
@@ -18,8 +18,7 @@ use tokio::io::AsyncWriteExt;
 /// 6. Anzeigen der Karte in einem Fenster.
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Umgebungsvariablen aus .env laden
-    dotenv().ok();
+    init_app();
 
     let client = reqwest::Client::builder()
         .user_agent("HydrantenFinder/1.0")

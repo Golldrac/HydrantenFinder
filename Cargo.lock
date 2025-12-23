@@ -6,6 +6,7 @@ version = 4
 name = "HydrantenFinder"
 version = "0.1.0"
 dependencies = [
+ "ansi_term",
  "anyhow",
  "dotenvy",
  "geo",
@@ -21,6 +22,7 @@ dependencies = [
  "tokio",
  "windows",
  "windows-future",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -52,6 +54,15 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "ansi_term"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "anyhow"
