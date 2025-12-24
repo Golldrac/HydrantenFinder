@@ -18,6 +18,9 @@ use crate::utils::init_app;
 /// 6. Anzeigen der Karte in einem Fenster.
 #[tokio::main]
 async fn main() -> Result<()> {
+
+    let _ = utils::test_db();
+    /*
     init_app();
 
     let client = reqwest::Client::builder()
@@ -68,6 +71,7 @@ async fn main() -> Result<()> {
     tokio::task::spawn_blocking(move || {
         utils::show_image_in_minifb(file_path)
     }).await??;
+    */
 
     Ok(())
 }
