@@ -3,8 +3,6 @@ use anyhow::Result;
 use image::GenericImageView;
 use indicatif::{ProgressBar, ProgressStyle};
 use minifb::{Key, Window, WindowOptions};
-use mysql::prelude::*;
-use mysql::*;
 use std::path::Path;
 use dotenvy::dotenv;
 use windows::Devices::Geolocation::{
@@ -181,30 +179,6 @@ pub fn init_app() {
     dotenv().ok();
     // 2. Terminal konfigurieren
     setup_terminal();
-}
-
-pub fn test_db()-> Result<()>{
-    let url = "mysql://root@localhost:3306/hydranten_cache";
-
-    // Verbindung herstellen
-    let pool = Pool::new(url)?;
-    let mut conn = pool.get_conn()?;
-
-    println!("Verbindung erfolgreich! Tabellen werden geladen...");
-
-    // Query ausführen
-    let tables: Vec<String> = conn.query("SHOW TABLES")?;
-
-    if tables.is_empty() {
-        println!("Keine Tabellen in der Datenbank gefunden.");
-    } else {
-        println!("Gefundene Tabellen:");
-        for table in tables {
-            println!("- {}", table);
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(windows)]

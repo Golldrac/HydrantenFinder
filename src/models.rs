@@ -217,6 +217,15 @@ pub enum HydrantPosition {
     Sidewalk, // Gehweg
 }
 
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct CachedRouteItem {
+    pub hydrant_id: i32,
+    pub distance: f64,
+    pub polyline: String,
+}
+
+
 // --- Impl-Blöcke ---
 
 impl Location {

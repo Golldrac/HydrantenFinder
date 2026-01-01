@@ -1,6 +1,7 @@
 mod api;
 mod models;
 mod utils;
+mod database;
 
 use std::time::Duration;
 
@@ -19,8 +20,6 @@ use crate::utils::init_app;
 #[tokio::main]
 async fn main() -> Result<()> {
 
-    let _ = utils::test_db();
-    /*
     init_app();
 
     let client = reqwest::Client::builder()
@@ -36,17 +35,23 @@ async fn main() -> Result<()> {
         user_location.latitude, user_location.longitude
     );
 
-    // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
-    // Der Radius (500m) ist in api::get_nearest_hydrants fest codiert.
-    let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
+    let best_hydrants = database::get_ranked_hydrants(&user_location);
+    let mut ranked_hydrants = best_hydrants?;
 
-    if hydrants.is_empty() {
-        println!("🔍 Keine Hydranten in der Nähe gefunden. Das Programm wird beendet.");
-        return Ok(());
+    if ranked_hydrants.is_empty(){
+        // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
+        // Der Radius (500m) ist in api::get_nearest_hydrants fest codiert.
+        let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
+
+        if hydrants.is_empty() {
+            println!("🔍 Keine Hydranten in der Nähe gefunden. Das Programm wird beendet.");
+            return Ok(());
+        }
+
+        // 3. Den am besten bewerteten Hydranten per Route (Fußweg) ermitteln und ranken
+        ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
     }
 
-    // 3. Den am besten bewerteten Hydranten per Route (Fußweg) ermitteln und ranken
-    let ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
     let best_hydrant = &ranked_hydrants[0];
 
     // Ausgabe der besten Route
@@ -71,7 +76,6 @@ async fn main() -> Result<()> {
     tokio::task::spawn_blocking(move || {
         utils::show_image_in_minifb(file_path)
     }).await??;
-    */
 
     Ok(())
 }
