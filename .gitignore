@@ -8,6 +8,7 @@
 # Operating system files
 .DS_Store
 Thumbs.db
+*.db
 
 # Environment variables (MUST NOT be committed)
 .env

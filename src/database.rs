@@ -1,25 +1,30 @@
-use anyhow::Result;
-use chrono::{Utc, NaiveDateTime, Duration};
+use std::sync::OnceLock;
+
+use anyhow::{anyhow, Context, Result};
+use chrono::{Duration, NaiveDateTime, Utc};
 use geohash::{encode, Coord};
 use mysql::prelude::*;
 use mysql::*;
 use serde_json;
-use std::sync::OnceLock;
 
-use crate::models::{Location, RankedHydrant, CachedRouteItem, HydrantTags, Hydrant, RouteDetails};
+use crate::models::{CachedRouteItem, Hydrant, HydrantTags, Location, RankedHydrant, RouteDetails};
 
+/// Die Verbindungs-URL zur lokalen MySQL-Datenbank.
 const URL: &str = "mysql://root@localhost:3306/hydranten_cache";
-const FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
+/// Globaler Datenbank-Pool, der einmalig beim Start initialisiert wird.
 static DB_POOL: OnceLock<Pool> = OnceLock::new();
 
-
-/// Erstellt die Tabellen, falls sie fehlen, und prüft die Verbindung.
+/// Initialisiert den Datenbank-Pool und erstellt die notwendigen Tabellenstrukturen,
+/// falls diese noch nicht existieren.
+///
+/// # Errors
+/// Gibt einen Fehler zurück, wenn die Verbindung fehlschlägt oder Tabellen nicht erstellt werden können.
 pub fn initialize_db() -> Result<()> {
-    let pool = Pool::new(URL)?;
-    let mut conn = pool.get_conn()?;
+    let pool = Pool::new(URL).context("Verbindung zum Datenbank-Server fehlgeschlagen")?;
+    let mut conn = pool.get_conn().context("Fehler beim Abrufen einer Verbindung aus dem Pool")?;
 
-    // 1. Hydranten Tabelle
+    // Hydranten-Stammdaten: Speichert Position und Metadaten (OSM-Tags)
     conn.query_drop(
         r"CREATE TABLE IF NOT EXISTS hydrants (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -28,155 +33,156 @@ pub fn initialize_db() -> Result<()> {
             lon DECIMAL(11, 8) NOT NULL,
             tags JSON,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
     )?;
 
-    // 2. Route Cache Tabelle
+    // Cache für Routenberechnungen: Verknüpft einen Standort (Geohash) mit Hydranten-IDs
     conn.query_drop(
         r"CREATE TABLE IF NOT EXISTS route_cache (
             geohash VARCHAR(8) NOT NULL PRIMARY KEY,
             routes JSON NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
     )?;
 
-    // Pool im globalen Speicher ablegen
-    DB_POOL.set(pool).map_err(|_| anyhow::anyhow!("Fehler beim Initialisieren des DB-Pools"))?;
+    DB_POOL
+        .set(pool)
+        .map_err(|_| anyhow!("Datenbank-Pool wurde bereits initialisiert"))?;
 
     Ok(())
 }
 
+/// Gibt eine Referenz auf den globalen Datenbank-Pool zurück.
+///
+/// # Panics
+/// Panikt, wenn der Pool vor dem Zugriff nicht mittels `initialize_db` initialisiert wurde.
 pub fn get_pool() -> &'static Pool {
     DB_POOL.get().expect("Datenbank-Pool wurde nicht initialisiert!")
 }
 
-pub fn get_ranked_hydrants(location: &Location)-> Result<Vec<RankedHydrant>> {
-    let c = Coord { x: location.longitude, y: location.latitude};
-    let geohash = encode(c, 8usize)?;
+/// Ruft bereits berechnete Hydranten-Rankings für einen bestimmten Standort aus dem Cache ab.
+///
+/// Berücksichtigt nur Einträge, die nicht älter als 2 Wochen sind.
+///
+/// # Errors
+/// Liefert Fehler bei Datenbankproblemen oder Deserialisierungsfehlern von JSON-Daten.
+pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
+    let coord = Coord {
+        x: location.longitude,
+        y: location.latitude,
+    };
+    let geohash = encode(coord, 8usize)?;
 
     let mut conn = get_pool().get_conn()?;
-    let response: Vec<(String, String)> = conn.query(format!(
-        "SELECT routes, created_at FROM route_cache WHERE geohash = '{}'",
-        geohash
-    ))?;
 
-    if response.is_empty() {
+    // Abfrage des Caches für den spezifischen Geohash
+    let row: Option<(String, NaiveDateTime)> = conn.exec_first(
+        "SELECT routes, created_at FROM route_cache WHERE geohash = :gh",
+        params! { "gh" => &geohash },
+    )?;
+
+    let (cached_routes_json, created_at) = match row {
+        Some(data) => data,
+        None => return Ok(Vec::new()),
+    };
+
+    // Validierung des Alters (maximal 2 Wochen)
+    let now = Utc::now().naive_utc();
+    if now.signed_duration_since(created_at) > Duration::weeks(2) {
         return Ok(Vec::new());
     }
 
-    let created_at = &response[0].1;
+    let cached_items: Vec<CachedRouteItem> = serde_json::from_str(&cached_routes_json)?;
+    let mut ranked_hydrants = Vec::with_capacity(cached_items.is_empty().then_some(0).unwrap_or(cached_items.len()));
 
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(created_at, FORMAT) {
+    for item in cached_items {
+        // Details zum Hydranten aus der Stammdaten-Tabelle laden
+        let hydrant_row: Option<(u64, f64, f64, String)> = conn.exec_first(
+            "SELECT osm_id, lat, lon, tags FROM hydrants WHERE id = :id",
+            params! { "id" => item.hydrant_id },
+        )?;
 
-        let past_time = naive_dt.and_utc();
-        let now = Utc::now();
+        if let Some((osm_id, lat, lon, tags_str)) = hydrant_row {
+            let tags: HydrantTags = serde_json::from_str(&tags_str)?;
 
-        let duration = now.signed_duration_since(past_time);
+            let hydrant = Hydrant {
+                osm_id,
+                longitude: lon,
+                latitude: lat,
+                tags: Some(tags),
+            };
 
-        if duration > Duration::weeks(2) {
-            return Ok(Vec::new());
+            let details = RouteDetails {
+                distance_meters: item.distance,
+                geometry_polyline: item.polyline,
+            };
+
+            ranked_hydrants.push(RankedHydrant::new(hydrant, details));
         }
-
     }
 
-    //TODO: Errorhandling verbessern
-    let cached_routes = &response[0].0;
-    let cached_routes_json: Vec<CachedRouteItem> = serde_json::from_str(cached_routes)?;
-
-    let mut ret: Vec<RankedHydrant> = Vec::new();
-
-    for route_item in cached_routes_json{
-
-        let item_response: Vec<(u64, f64, f64, String)> = conn.query(format!(
-            "SELECT osm_id, lat, lon, tags FROM hydrants WHERE id = '{}'",
-            route_item.hydrant_id
-        ))?;
-
-        if item_response.is_empty() {
-            continue; // Falls ein Hydrant fehlt, überspringen
-        }
-
-        let (osm_id, lat, lon, tags_json) = &item_response[0];
-        let hyd_tags: HydrantTags = serde_json::from_str(tags_json)?;
-
-
-        let hydrant = Hydrant {
-            osm_id: *osm_id,
-            longitude: *lon,
-            latitude: *lat,
-            tags: Some(hyd_tags),
-        };
-
-        let details = RouteDetails{
-            distance_meters: route_item.distance,
-            geometry_polyline: route_item.polyline,
-        };
-
-        let ranked_hydrant = RankedHydrant::new(hydrant, details);
-
-        ret.push(ranked_hydrant);
-
-    }
-
-    Ok(ret)
+    Ok(ranked_hydrants)
 }
 
-pub fn save_ranked_hydrants(location: &Location, hydrants: &Vec<RankedHydrant>)-> Result<()>{
-
-    let mut cached_route_items = Vec::new();
-
+/// Speichert eine Liste von gerankten Hydranten im Cache und aktualisiert die Stammdaten.
+///
+/// Nutzt `ON DUPLICATE KEY UPDATE`, um bestehende Hydranten-Informationen zu aktualisieren.
+///
+/// # Errors
+/// Gibt einen Fehler zurück, wenn die Serialisierung fehlschlägt oder die Datenbank nicht erreichbar ist.
+pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> Result<()> {
     let mut conn = get_pool().get_conn()?;
+    let mut cached_route_items = Vec::with_capacity(hydrants.len());
 
-    for hydrant in hydrants {
-        let osm_id = hydrant.hydrant.osm_id;
-        let lat = hydrant.hydrant.latitude;
-        let lon = hydrant.hydrant.longitude;
-        let tags = serde_json::to_string(&hydrant.hydrant.tags)?;
+    for ranked in hydrants {
+        let h = &ranked.hydrant;
+        let tags_json = serde_json::to_string(&h.tags)?;
 
+        // Hydrant in Stammdaten sichern/aktualisieren
         conn.exec_drop(
             r"INSERT INTO hydrants (osm_id, lat, lon, tags)
-                    VALUES (:osm_id, :lat, :lon, :tags)
-                    ON DUPLICATE KEY UPDATE
-                    lat = VALUES(lat),
-                    lon = VALUES(lon),
-                    tags = VALUES(tags)",
+              VALUES (:osm_id, :lat, :lon, :tags)
+              ON DUPLICATE KEY UPDATE
+              lat = VALUES(lat), lon = VALUES(lon), tags = VALUES(tags)",
             params! {
-                    "osm_id" => osm_id,
-                    "lat" => lat,
-                    "lon" => lon,
-                    "tags" => tags, // tags ist hier der JSON-String
+                "osm_id" => h.osm_id,
+                "lat" => h.latitude,
+                "lon" => h.longitude,
+                "tags" => tags_json,
             },
         )?;
 
-        let response: Vec<String> = conn.query(format!(
-            "SELECT id FROM hydrants WHERE osm_id = {};", osm_id
-        ))?;
+        // Interne ID für die Relation im route_cache abrufen
+        let hydrant_id: i32 = conn.exec_first(
+            "SELECT id FROM hydrants WHERE osm_id = :osm_id",
+            params! { "osm_id" => h.osm_id },
+        )?
+            .context("Fehler beim Abrufen der Hydranten-ID nach dem Insert")?;
 
-        let hydrant_id = response[0].parse::<i32>()?;
-
-        let route_item = CachedRouteItem {
+        cached_route_items.push(CachedRouteItem {
             hydrant_id,
-            distance: hydrant.route_details.distance_meters,
-            polyline: hydrant.route_details.geometry_polyline.parse().unwrap(),
-        };
-
-        cached_route_items.push(route_item);
-
+            distance: ranked.route_details.distance_meters,
+            polyline: ranked.route_details.geometry_polyline.clone(),
+        });
     }
 
-    let c = Coord { x: location.longitude, y: location.latitude};
-    let geohash = encode(c, 8usize)?;
+    // Routen-Cache für den aktuellen Standort speichern
+    let coord = Coord {
+        x: location.longitude,
+        y: location.latitude,
+    };
+    let geohash = encode(coord, 8usize)?;
 
     conn.exec_drop(
         r"INSERT INTO route_cache (geohash, routes, created_at)
-                VALUES (:geohash, :routes, NOW())
-                ON DUPLICATE KEY UPDATE
-                routes = VALUES(routes),
-                created_at = NOW()",
+          VALUES (:geohash, :routes, NOW())
+          ON DUPLICATE KEY UPDATE
+          routes = VALUES(routes), created_at = NOW()",
         params! {
-                "geohash" => geohash,
-                "routes" => serde_json::to_string(&cached_route_items)?,
+            "geohash" => geohash,
+            "routes" => serde_json::to_string(&cached_route_items)?,
         },
     )?;
+
     Ok(())
 }

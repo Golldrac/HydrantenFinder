@@ -427,6 +427,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1866,6 +1867,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "cc",
+ "chrono",
  "cmake",
  "crc32fast",
  "flate2",
