@@ -174,11 +174,16 @@ pub fn show_image_in_minifb(file_path: &str) -> Result<()> {
 }
 
 /// Initialisiert die Anwendung (Umgebungsvariablen und Terminal-Einstellungen)
-pub fn init_app() {
+pub fn init_app()-> Result<()> {
     // 1. .env laden (Plattformunabhängig)
     dotenv().ok();
     // 2. Terminal konfigurieren
     setup_terminal();
+
+    // 3. Datenbank initialisieren (Tabellen erstellen & Pool bereitstellen)
+    crate::database::initialize_db()?;
+
+    Ok(())
 }
 
 #[cfg(windows)]

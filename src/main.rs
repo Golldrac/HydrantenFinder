@@ -20,8 +20,8 @@ use crate::utils::init_app;
 #[tokio::main]
 async fn main() -> Result<()> {
 
-    init_app();
-
+    init_app()?;
+    //TODO: in init_app() verschieben?
     let client = reqwest::Client::builder()
         .user_agent("HydrantenFinder/1.0")
         .timeout(Duration::from_secs(30))
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
 
     let best_hydrants = database::get_ranked_hydrants(&user_location);
     let mut ranked_hydrants = best_hydrants?;
-
+    //TODO: leichte Fehlerbehandlung hier, wenn database::get_ranked_hydrants fehler abwirft, gleiches wie bei leerem Vektor machen
     if ranked_hydrants.is_empty(){
         // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
         // Der Radius (500m) ist in api::get_nearest_hydrants fest codiert.
@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
 
         // 3. Den am besten bewerteten Hydranten per Route (Fußweg) ermitteln und ranken
         ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
+        database::save_ranked_hydrants(&user_location, &ranked_hydrants)?;
     }
 
     let best_hydrant = &ranked_hydrants[0];

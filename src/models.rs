@@ -138,6 +138,10 @@ pub struct Location {
 /// Repräsentiert einen Hydranten, abgeleitet von `Location`, aber mit zusätzlichen OSM-Tags.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Hydrant {
+
+    #[serde(rename = "id")]
+    pub osm_id: u64,
+
     /// Die Länge (Longitude) der Position.
     #[serde(rename = "lon")]
     pub longitude: f64,
@@ -147,6 +151,7 @@ pub struct Hydrant {
     /// Optionale Tags des Hydranten, die von Overpass geliefert werden.
     #[serde(rename = "tags")]
     pub tags: Option<HydrantTags>,
+
 }
 
 /// Die von der Overpass API zurückgegebenen Tags für einen Hydranten.
