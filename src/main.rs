@@ -50,7 +50,9 @@ async fn main() -> Result<()> {
 
         // 3. Den am besten bewerteten Hydranten per Route (Fußweg) ermitteln und ranken
         ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
-        database::save_ranked_hydrants(&user_location, &ranked_hydrants)?;
+        let list = ranked_hydrants.clone();
+        let loc = user_location.clone();
+        tokio::task::spawn_blocking(move || database::save_ranked_hydrants(&loc, &list));
     }
 
     let best_hydrant = &ranked_hydrants[0];
@@ -74,9 +76,7 @@ async fn main() -> Result<()> {
     file.write_all(&map_bytes).await?;
 
     // Starte die Anzeige in einer blockierenden Task
-    tokio::task::spawn_blocking(move || {
-        utils::show_image_in_minifb(file_path)
-    }).await??;
+    tokio::task::spawn_blocking(move || utils::show_image_in_minifb(file_path)).await??;
 
     Ok(())
 }
