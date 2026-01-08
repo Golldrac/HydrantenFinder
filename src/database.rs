@@ -83,12 +83,17 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
 
     let (cached_routes_json, created_at) = match row {
         Some(data) => data,
-        None => return Ok(Vec::new()),
+        None => {
+            println!("🔍 Kein Cache-Eintrag für Geohash {} gefunden.", geohash);
+            return Ok(Vec::new())
+        },
+
     };
 
     // Validierung des Alters (maximal 2 Wochen)
     let now = Utc::now().naive_utc();
     if now.signed_duration_since(created_at) > Duration::weeks(2) {
+        println!("🔍 Cache-Eintrag für Geohash {} ist veraltet.", geohash);
         return Ok(Vec::new());
     }
 
@@ -103,7 +108,13 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
         )?;
 
         if let Some((osm_id, lat, lon, tags_str)) = hydrant_row {
-            let tags: HydrantTags = serde_json::from_str(&tags_str)?;
+            let tags: HydrantTags = match serde_json::from_str(&tags_str) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("⚠️ Fehler beim Parsen der Tags für Hydrant {}: {}", osm_id, e);
+                    continue;
+                }
+            };
 
             let hydrant = Hydrant {
                 osm_id,
@@ -132,6 +143,8 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
 /// Gibt einen Fehler zurück, wenn die Serialisierung fehlschlägt oder die Datenbank nicht erreichbar ist.
 pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> Result<()> {
     let mut conn = get_pool().get_conn()?;
+    let mut tx = conn.start_transaction(TxOpts::default())?;
+
     let mut cached_route_items = Vec::with_capacity(hydrants.len());
 
     for ranked in hydrants {
@@ -139,7 +152,7 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> 
         let tags_json = serde_json::to_string(&h.tags)?;
 
         // Hydrant in Stammdaten sichern/aktualisieren
-        conn.exec_drop(
+        tx.exec_drop(
             r"INSERT INTO hydrants (osm_id, lat, lon, tags)
               VALUES (:osm_id, :lat, :lon, :tags)
               ON DUPLICATE KEY UPDATE
@@ -153,7 +166,7 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> 
         )?;
 
         // Interne ID für die Relation im route_cache abrufen
-        let hydrant_id: i32 = conn.exec_first(
+        let hydrant_id: i32 = tx.exec_first(
             "SELECT id FROM hydrants WHERE osm_id = :osm_id",
             params! { "osm_id" => h.osm_id },
         )?
@@ -173,7 +186,7 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> 
     };
     let geohash = encode(coord, 8usize)?;
 
-    conn.exec_drop(
+    tx.exec_drop(
         r"INSERT INTO route_cache (geohash, routes, created_at)
           VALUES (:geohash, :routes, NOW())
           ON DUPLICATE KEY UPDATE
@@ -183,6 +196,8 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> 
             "routes" => serde_json::to_string(&cached_route_items)?,
         },
     )?;
+
+    tx.commit()?;
 
     Ok(())
 }

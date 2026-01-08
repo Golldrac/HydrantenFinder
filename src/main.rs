@@ -35,9 +35,11 @@ async fn main() -> Result<()> {
         user_location.latitude, user_location.longitude
     );
 
-    let best_hydrants = database::get_ranked_hydrants(&user_location);
-    let mut ranked_hydrants = best_hydrants?;
-    //TODO: leichte Fehlerbehandlung hier, wenn database::get_ranked_hydrants fehler abwirft, gleiches wie bei leerem Vektor machen
+    let mut ranked_hydrants = database::get_ranked_hydrants(&user_location)
+        .unwrap_or_else(|e| {
+            eprintln!("⚠️ Cache-Fehler: {}. Fahre mit API-Abfrage fort...", e);
+            Vec::new() // Bei Fehler einfach leeren Vektor zurückgeben
+        });
     if ranked_hydrants.is_empty(){
         // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
         // Der Radius (500m) ist in api::get_nearest_hydrants fest codiert.

@@ -102,7 +102,7 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &
                 anyhow::bail!("❌ Overpass-API-Aufruf fehlgeschlagen: {}", e);
             }
         };
-
+        //TODO: wenn The server is probably too busy to handle your request (504)
         if !response.status().is_success() {
             let status = response.status();
             let body = response
@@ -693,25 +693,16 @@ pub async fn get_map(
         }
     };
 
-    if !response.status().is_success() {
+    if response.status().is_success() {
+        // Korrekt: Bilddaten als Bytes abrufen
+        let bytes = response.bytes().await?.to_vec();
+        Ok(bytes)
+    } else {
+        // Fehlerfall: Nur den Statuscode ausgeben, nicht den (binären) Body
         let status = response.status();
-        // Versuch, den Fehler-Body abzurufen. Ungültige/Fehlende Bodies werden ignoriert,
-        // um keinen doppelten Fehler beim Logging zu erzeugen.
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-
-        // Einheitliche Fehlermeldung
-        anyhow::bail!(
-            "❌ Stadia-Maps-API-Fehler (Status: {}). Antwort: {}",
-            status,
-            body
-        );
+        anyhow::bail!("❌API-Fehler beim Kartenabruf: Status {}", status);
     }
 
-    // Nur, wenn der Status erfolgreich (2xx) ist, die Bilddaten abrufen.
-    Ok(response.bytes().await?.to_vec())
 }
 
 /// Berechnet einen geeigneten Zoomlevel für die statische Karte,
@@ -845,6 +836,15 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
         // 2. Prüfe auf spezielle Netzwerk- und Timeout-Fehler
         if reqwest_error.is_timeout() || reqwest_error.is_connect() {
             return true;
+        }
+
+        if let Some(status) = reqwest_error.status() {
+
+            if status ==  reqwest::StatusCode::GATEWAY_TIMEOUT ||
+                status == reqwest::StatusCode::SERVICE_UNAVAILABLE ||
+                status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return true;
+            }
         }
 
         // Wenn es ein request-Fehler ist, aber keiner der oben genannten (z.B. DNS-Fehler, aber kein Timeout),
