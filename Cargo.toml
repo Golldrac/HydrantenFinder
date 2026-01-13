@@ -24,3 +24,4 @@ ansi_term = "0.12.1"
 mysql = { version = "25.0.0", features = ["chrono"] }
 geohash = "0.13.1"
 chrono = { version = "0.4", features = ["serde"] }
+ctrlc = "3.5.1"

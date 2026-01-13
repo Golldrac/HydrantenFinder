@@ -3,6 +3,9 @@ mod models;
 mod utils;
 mod database;
 
+use std::process::exit;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -20,15 +23,9 @@ use crate::utils::init_app;
 #[tokio::main]
 async fn main() -> Result<()> {
 
-    init_app()?;
-    //TODO: in init_app() verschieben?
-    let client = reqwest::Client::builder()
-        .user_agent("HydrantenFinder/1.0")
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let (client, running, in_db) = init_app()?;
 
     // 1. Benutzerkoordinaten abrufen
-
     let user_location = utils::get_user_coordinates().await?;
     println!(
         "📍 Standort gefunden: Breite={}, Länge={}.",
@@ -38,11 +35,10 @@ async fn main() -> Result<()> {
     let mut ranked_hydrants = database::get_ranked_hydrants(&user_location)
         .unwrap_or_else(|e| {
             eprintln!("⚠️ Cache-Fehler: {}. Fahre mit API-Abfrage fort...", e);
-            Vec::new() // Bei Fehler einfach leeren Vektor zurückgeben
+            Vec::new()
         });
     if ranked_hydrants.is_empty(){
         // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
-        // Der Radius (500m) ist in api::get_nearest_hydrants fest codiert.
         let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
 
         if hydrants.is_empty() {
@@ -54,7 +50,16 @@ async fn main() -> Result<()> {
         ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
         let list = ranked_hydrants.clone();
         let loc = user_location.clone();
-        tokio::task::spawn_blocking(move || database::save_ranked_hydrants(&loc, &list));
+        let r_for_db = Arc::clone(&running);
+        let db_for_db = Arc::clone(&in_db);
+
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = database::save_ranked_hydrants(&loc, &list, &r_for_db, &db_for_db) {
+                eprintln!("⚠️ Fehler beim Speichern im Cache: {}", e);
+            }
+        });
+
+
     }
 
     let best_hydrant = &ranked_hydrants[0];

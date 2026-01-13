@@ -4,7 +4,12 @@ use image::GenericImageView;
 use indicatif::{ProgressBar, ProgressStyle};
 use minifb::{Key, Window, WindowOptions};
 use std::path::Path;
+use std::process::exit;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use dotenvy::dotenv;
+use reqwest::Client;
 use windows::Devices::Geolocation::{
     Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
 };
@@ -174,7 +179,7 @@ pub fn show_image_in_minifb(file_path: &str) -> Result<()> {
 }
 
 /// Initialisiert die Anwendung (Umgebungsvariablen und Terminal-Einstellungen)
-pub fn init_app()-> Result<()> {
+pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
     // 1. .env laden (Plattformunabhängig)
     dotenv().ok();
     // 2. Terminal konfigurieren
@@ -183,7 +188,28 @@ pub fn init_app()-> Result<()> {
     // 3. Datenbank initialisieren (Tabellen erstellen & Pool bereitstellen)
     crate::database::initialize_db()?;
 
-    Ok(())
+    let client = reqwest::Client::builder()
+        .user_agent("HydrantenFinder/1.0")
+        .timeout(Duration::from_secs(30))
+        .build()?;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let in_db = Arc::new(AtomicBool::new(false));
+
+    let r_sig = Arc::clone(&running);
+    let db_sig = Arc::clone(&in_db);
+
+
+    ctrlc::set_handler(move || {
+        if db_sig.load(Ordering::SeqCst) {
+            println!("🗄️ Datenbank aktiv. Beende nach Abschluss...");
+            r_sig.store(false, Ordering::SeqCst);
+        } else {
+            exit(0);
+        }
+    }).expect("Error setting handler");
+
+    Ok((client, running, in_db))
 }
 
 #[cfg(windows)]

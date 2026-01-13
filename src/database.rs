@@ -1,3 +1,6 @@
+use std::process::exit;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
@@ -141,7 +144,10 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
 ///
 /// # Errors
 /// Gibt einen Fehler zurück, wenn die Serialisierung fehlschlägt oder die Datenbank nicht erreichbar ist.
-pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> Result<()> {
+pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant], r_for_db: &Arc<AtomicBool>, db_for_db: &Arc<AtomicBool>) -> Result<()> {
+
+    db_for_db.store(true, Ordering::SeqCst);
+    
     let mut conn = get_pool().get_conn()?;
     let mut tx = conn.start_transaction(TxOpts::default())?;
 
@@ -198,6 +204,13 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant]) -> 
     )?;
 
     tx.commit()?;
+
+    db_for_db.store(false, Ordering::SeqCst);
+
+    if !r_for_db.load(Ordering::SeqCst) {
+        println!("🗄️ Datenbank bearbeitung abgeschlossen. Beende Programm...");
+        exit(0);
+    }
 
     Ok(())
 }
