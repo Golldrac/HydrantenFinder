@@ -9,7 +9,7 @@ use geo_types::Coord;
 use indicatif::{ProgressBar, ProgressStyle};
 use polyline;
 use rand::Rng;
-use reqwest::{self, Client, StatusCode};
+use reqwest::{self, Client};
 use serde_json;
 use tokio::task;
 use tokio::time::{self, sleep, Duration};
@@ -102,13 +102,22 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &
                 anyhow::bail!("❌ Overpass-API-Aufruf fehlgeschlagen: {}", e);
             }
         };
+
         //TODO: wenn The server is probably too busy to handle your request (504)
-        if !response.status().is_success() {
+        if !response.status().is_success(){
             let status = response.status();
+
+            if status ==  reqwest::StatusCode::GATEWAY_TIMEOUT{
+                let delay = base_delay * (2_i32.pow(attempt) as u32);
+                sleep(delay).await;
+                continue;
+            }
+
             let body = response
                 .text()
                 .await
                 .context("Overpass: Kein Antwort-Body verfügbar")?;
+
             anyhow::bail!(
                 "❌ Overpass-API-Fehler (Status: {}). Antwort: {}",
                 status,
@@ -830,21 +839,19 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
     if let Some(reqwest_error) = e.downcast_ref::<reqwest::Error>() {
         // 1. Prüfe auf HTTP Status Code Fehler (5xx Server-Fehler, 429 Rate Limit)
         if let Some(status) = reqwest_error.status() {
-            return status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+            if status ==  reqwest::StatusCode::GATEWAY_TIMEOUT ||
+                status == reqwest::StatusCode::SERVICE_UNAVAILABLE ||
+                status == reqwest::StatusCode::TOO_MANY_REQUESTS ||
+                status == reqwest::StatusCode::INTERNAL_SERVER_ERROR ||
+                status == reqwest::StatusCode::REQUEST_TIMEOUT ||
+                status.is_server_error() {
+                return true;
+            }
         }
 
         // 2. Prüfe auf spezielle Netzwerk- und Timeout-Fehler
         if reqwest_error.is_timeout() || reqwest_error.is_connect() {
             return true;
-        }
-
-        if let Some(status) = reqwest_error.status() {
-
-            if status ==  reqwest::StatusCode::GATEWAY_TIMEOUT ||
-                status == reqwest::StatusCode::SERVICE_UNAVAILABLE ||
-                status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return true;
-            }
         }
 
         // Wenn es ein request-Fehler ist, aber keiner der oben genannten (z.B. DNS-Fehler, aber kein Timeout),
