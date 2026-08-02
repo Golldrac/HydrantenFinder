@@ -9,7 +9,7 @@ use geo_types::Coord;
 use indicatif::{ProgressBar, ProgressStyle};
 use polyline;
 use rand::RngExt;
-use reqwest::{self, Client, StatusCode};
+use reqwest::{self, Client};
 use serde_json;
 use tokio::task;
 use tokio::time::{self, sleep, Duration};

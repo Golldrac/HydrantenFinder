@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
             eprintln!("[!] Cache-Fehler: {}. Fahre mit API-Abfrage fort...", e);
             Vec::new()
         });
+    let mut db_handle= None;
     if ranked_hydrants.is_empty(){
         // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
         let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
@@ -52,11 +53,11 @@ async fn main() -> Result<()> {
         let r_for_db = Arc::clone(&running);
         let db_for_db = Arc::clone(&in_db);
 
-        tokio::task::spawn_blocking(move || {
+        db_handle = Some(tokio::task::spawn_blocking(move || {
             if let Err(e) = database::save_ranked_hydrants(&loc, &list, &r_for_db, &db_for_db) {
                 eprintln!("[!] Fehler beim Speichern im Cache: {}", e);
             }
-        });
+        }));
 
 
     }
@@ -83,6 +84,9 @@ async fn main() -> Result<()> {
 
     // Starte die Anzeige in einer blockierenden Task
     tokio::task::spawn_blocking(move || utils::show_image_in_minifb(file_path)).await??;
+    if let Some(handle) = db_handle {
+        let _ = handle.await;
+    }
 
     Ok(())
 }
