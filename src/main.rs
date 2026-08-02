@@ -23,15 +23,17 @@ async fn main() -> Result<()> {
     let (client, running, in_db) = init_app()?;
 
     // 1. Benutzerkoordinaten abrufen
+
     let user_location = utils::get_user_coordinates().await?;
     println!(
-        "📍 Standort gefunden: Breite={}, Länge={}.",
-        user_location.latitude, user_location.longitude
+        "[+] Standort gefunden: Breite={}, Länge={}.",
+        user_location.latitude,
+        user_location.longitude
     );
 
     let mut ranked_hydrants = database::get_ranked_hydrants(&user_location)
         .unwrap_or_else(|e| {
-            eprintln!("⚠️ Cache-Fehler: {}. Fahre mit API-Abfrage fort...", e);
+            eprintln!("[!] Cache-Fehler: {}. Fahre mit API-Abfrage fort...", e);
             Vec::new()
         });
     if ranked_hydrants.is_empty(){
@@ -39,7 +41,7 @@ async fn main() -> Result<()> {
         let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
 
         if hydrants.is_empty() {
-            println!("🔍 Keine Hydranten in der Nähe gefunden. Das Programm wird beendet.");
+            println!("[-] Keine Hydranten in der Nähe gefunden. Das Programm wird beendet.");
             return Ok(());
         }
 
@@ -52,7 +54,7 @@ async fn main() -> Result<()> {
 
         tokio::task::spawn_blocking(move || {
             if let Err(e) = database::save_ranked_hydrants(&loc, &list, &r_for_db, &db_for_db) {
-                eprintln!("⚠️ Fehler beim Speichern im Cache: {}", e);
+                eprintln!("[!] Fehler beim Speichern im Cache: {}", e);
             }
         });
 
@@ -63,7 +65,7 @@ async fn main() -> Result<()> {
 
     // Ausgabe der besten Route
     println!(
-        "🔥 Nächster Hydrant gefunden: Distanz: {:.1}m. Score: {:.2}",
+        "[+] Nächster Hydrant gefunden: Distanz: {:.1}m. Score: {:.2}",
         best_hydrant.route_details.distance_meters,
         best_hydrant.score
     );

@@ -353,22 +353,22 @@ impl HydrantTags {
     /// Gibt die bekannten Eigenschaften des Hydranten auf der Konsole aus.
     pub fn output(&self) {
         if let Some(shape) = &self.shape {
-            println!("🧯 Es handelt sich um einen {}", shape.to_display_name());
+            println!("Es handelt sich um einen {}", shape.to_display_name());
         }
         if let Some(diameter) = &self.diameter {
-            println!("🧯 Das Rohr hat einen Durchmesser von {}mm", diameter);
+            println!("Das Rohr hat einen Durchmesser von {}mm", diameter);
         }
         if let Some(position) = &self.position {
             match position {
-                HydrantPosition::Green => println!("🧯 Der Hydrant befindet sich auf einer Grünfläche."),
-                HydrantPosition::Lane => println!("🧯 Der Hydrant befindet sich auf der Straße."),
-                HydrantPosition::ParkingLot => println!("🧯 Der Hydrant befindet sich auf einem Parkplatz."),
-                HydrantPosition::Sidewalk => println!("🧯 Der Hydrant befindet sich auf dem Gehweg."),
+                HydrantPosition::Green => println!("Der Hydrant befindet sich auf einer Grünfläche."),
+                HydrantPosition::Lane => println!("Der Hydrant befindet sich auf der Straße."),
+                HydrantPosition::ParkingLot => println!("Der Hydrant befindet sich auf einem Parkplatz."),
+                HydrantPosition::Sidewalk => println!("Der Hydrant befindet sich auf dem Gehweg."),
             }
         }
 
         if let Some(couplings) = &self.couplings {
-            println!("🧯 Der Hydrant hat {} Kupplung(en).", couplings);
+            println!("Der Hydrant hat {} Kupplung(en).", couplings);
         }
     }
 }

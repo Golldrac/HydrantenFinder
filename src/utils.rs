@@ -47,7 +47,6 @@ const SCALE_FACTOR: f32 = 0.6;
 /// * Die Windows API einen Fehler zurückgibt (z.B. Timeout oder interner Fehler).
 
 pub async fn get_user_coordinates() -> Result<Location> {
-    // ... (Funktionsimplementierung unverändert)
     let access_status = Geolocator::RequestAccessAsync()?.await?;
 
     match access_status {
@@ -73,13 +72,12 @@ pub async fn get_user_coordinates() -> Result<Location> {
             Ok(loc)
         }
         GeolocationAccessStatus::Denied => {
-            anyhow::bail!("❌ Standortzugriff wurde in den Windows-Einstellungen verweigert.");
+            anyhow::bail!("[X] Standortzugriff wurde in den Windows-Einstellungen verweigert.");
         }
         GeolocationAccessStatus::Unspecified => {
-            anyhow::bail!("⚠️ Unspezifizierter Fehler beim Abrufen des Standortzugriffs.");
+            anyhow::bail!("[!] Unspezifizierter Fehler beim Abrufen des Standortzugriffs.");
         }
-        // Deckt zukünftige/unbekannte Status ab.
-        _ => anyhow::bail!("❓ Unbekannter Standortzugriffsstatus."),
+        _ => anyhow::bail!("[?] Unbekannter Standortzugriffsstatus."),
     }
 }
 
@@ -97,35 +95,27 @@ pub async fn get_user_coordinates() -> Result<Location> {
 /// Gibt einen Fehler zurück, wenn das Bild nicht geladen/dekodiert werden kann oder
 /// `minifb`-Operationen fehlschlagen.
 pub fn show_image_in_minifb(file_path: &str) -> Result<()> {
-    // ... (Funktionsimplementierung unverändert)
-    // 1. Spinner initialisieren
-    let spinner_style = ProgressStyle::with_template("{spinner:.cyan.bold} {msg}")?;
+    let spinner_style = ProgressStyle::with_template("{spinner} {msg}")?
+        .tick_chars("|/-\\ ");
     let pb = ProgressBar::new_spinner();
     pb.set_style(spinner_style);
-    pb.set_message("🖼️ Lade und berechne Bildpuffer...  .");
+    pb.set_message("Lade und berechne Bildpuffer...");
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    // 2. Das Bild laden, dekodieren und skalieren
     let img = image::open(Path::new(file_path))?;
 
-    // Berechne die neuen Abmessungen basierend auf dem globalen Skalierungsfaktor
     let new_width = (img.width() as f32 * SCALE_FACTOR) as u32;
     let new_height = (img.height() as f32 * SCALE_FACTOR) as u32;
 
-    // Skaliere das Bild auf die neue Größe (Herauszoomen).
     let resized_img =
         img.resize_exact(new_width, new_height, image::imageops::FilterType::Nearest);
 
-    // Abmessungen des *skalierten* Bildes abrufen
     let width = resized_img.width() as usize;
     let height = resized_img.height() as usize;
 
-    // 3. Den Pixelpuffer vorbereiten
     let mut buffer: Vec<u32> = vec![0; width * height];
 
-    // Iteriere über die Pixel des skalierten Bildes und konvertiere sie in das u32-Format.
     for (x, y, pixel) in resized_img.pixels() {
-        // 'pixel.0' ist ein Array von [r, g, b, a] oder [r, g, b]
         let (r, g, b, a) = match pixel.0.len() {
             4 => (
                 pixel.0[0] as u32,
@@ -142,36 +132,29 @@ pub fn show_image_in_minifb(file_path: &str) -> Result<()> {
             _ => continue,
         };
 
-        // ARGB-Format: (Alpha << 24) | (Rot << 16) | (Grün << 8) | (Blau)
         let color = (a << 24) | (r << 16) | (g << 8) | b;
 
-        // Berechne den Index im flachen Puffer
         let index = (y as usize) * width + (x as usize);
         buffer[index] = color;
     }
 
     pb.finish();
-    println!("✅ Route gespeichert und Karte wird geöffnet: {}.", file_path);
+    println!("[+] Route gespeichert und Karte wird geöffnet: {}.", file_path);
 
-    // 5. Das Fenster erstellen
     let mut window = Window::new(
         "Route (ESC zum Schließen)",
         width,
         height,
-        // Optionen für das Fenster
         WindowOptions {
             scale: minifb::Scale::FitScreen,
             ..WindowOptions::default()
         },
     )?;
 
-    // Begrenze die Aktualisierungsrate des Fensters auf 60 FPS
-    window.limit_update_rate(Some(std::time::Duration::from_millis(1000 / 60)));
+    window.set_target_fps(60);
 
 
-    // 6. Die Ereignisschleife (Loop)
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        // Aktualisiere den Fensterinhalt mit dem Pixelpuffer
         window.update_with_buffer(&buffer, width, height)?;
     }
 
@@ -182,10 +165,7 @@ pub fn show_image_in_minifb(file_path: &str) -> Result<()> {
 pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
     // 1. .env laden (Plattformunabhängig)
     dotenv().ok();
-    // 2. Terminal konfigurieren
     setup_terminal();
-
-    // 3. Datenbank initialisieren (Tabellen erstellen & Pool bereitstellen)
     crate::database::initialize_db()?;
 
     let client = reqwest::Client::builder()
@@ -215,16 +195,20 @@ pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
 #[cfg(windows)]
 fn setup_terminal() {
     unsafe {
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, GetConsoleMode, SetConsoleMode,
+            SetConsoleOutputCP, SetConsoleCP,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE
+        };
+
+        SetConsoleOutputCP(65001);
+        SetConsoleCP(65001);
+
         let handle = GetStdHandle(STD_OUTPUT_HANDLE);
         let mut mode = 0;
         if GetConsoleMode(handle, &mut mode) != 0 {
-            // Aktiviert ANSI-Sequenzen für Farben und Emojis
             let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         }
-        // Setzt die Codepage auf UTF-8
-        let _ = std::process::Command::new("cmd")
-            .args(&["/c", "chcp 65001"])
-            .output();
     }
 }
 

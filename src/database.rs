@@ -27,7 +27,6 @@ pub fn initialize_db() -> Result<()> {
     let pool = Pool::new(URL).context("Verbindung zum Datenbank-Server fehlgeschlagen")?;
     let mut conn = pool.get_conn().context("Fehler beim Abrufen einer Verbindung aus dem Pool")?;
 
-    // Hydranten-Stammdaten: Speichert Position und Metadaten (OSM-Tags)
     conn.query_drop(
         r"CREATE TABLE IF NOT EXISTS hydrants (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -39,7 +38,6 @@ pub fn initialize_db() -> Result<()> {
         ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
     )?;
 
-    // Cache für Routenberechnungen: Verknüpft einen Standort (Geohash) mit Hydranten-IDs
     conn.query_drop(
         r"CREATE TABLE IF NOT EXISTS route_cache (
             geohash VARCHAR(8) NOT NULL PRIMARY KEY,
@@ -78,7 +76,6 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
 
     let mut conn = get_pool().get_conn()?;
 
-    // Abfrage des Caches für den spezifischen Geohash
     let row: Option<(String, NaiveDateTime)> = conn.exec_first(
         "SELECT routes, created_at FROM route_cache WHERE geohash = :gh",
         params! { "gh" => &geohash },
@@ -87,16 +84,15 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
     let (cached_routes_json, created_at) = match row {
         Some(data) => data,
         None => {
-            println!("🔍 Kein Cache-Eintrag für Geohash {} gefunden.", geohash);
+            println!("[-] Kein Cache-Eintrag für Geohash {} gefunden.", geohash);
             return Ok(Vec::new())
         },
 
     };
 
-    // Validierung des Alters (maximal 2 Wochen)
     let now = Utc::now().naive_utc();
     if now.signed_duration_since(created_at) > Duration::weeks(2) {
-        println!("🔍 Cache-Eintrag für Geohash {} ist veraltet.", geohash);
+        println!("[!] Cache-Eintrag für Geohash {} ist veraltet.", geohash);
         return Ok(Vec::new());
     }
 
@@ -104,7 +100,6 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
     let mut ranked_hydrants = Vec::with_capacity(cached_items.is_empty().then_some(0).unwrap_or(cached_items.len()));
 
     for item in cached_items {
-        // Details zum Hydranten aus der Stammdaten-Tabelle laden
         let hydrant_row: Option<(u64, f64, f64, String)> = conn.exec_first(
             "SELECT osm_id, lat, lon, tags FROM hydrants WHERE id = :id",
             params! { "id" => item.hydrant_id },
@@ -114,7 +109,7 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
             let tags: HydrantTags = match serde_json::from_str(&tags_str) {
                 Ok(t) => t,
                 Err(e) => {
-                    eprintln!("⚠️ Fehler beim Parsen der Tags für Hydrant {}: {}", osm_id, e);
+                    eprintln!("[!] Fehler beim Parsen der Tags für Hydrant {}: {}", osm_id, e);
                     continue;
                 }
             };
@@ -147,7 +142,7 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
 pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant], r_for_db: &Arc<AtomicBool>, db_for_db: &Arc<AtomicBool>) -> Result<()> {
 
     db_for_db.store(true, Ordering::SeqCst);
-    
+
     let mut conn = get_pool().get_conn()?;
     let mut tx = conn.start_transaction(TxOpts::default())?;
 
@@ -171,7 +166,6 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant], r_f
             },
         )?;
 
-        // Interne ID für die Relation im route_cache abrufen
         let hydrant_id: i32 = tx.exec_first(
             "SELECT id FROM hydrants WHERE osm_id = :osm_id",
             params! { "osm_id" => h.osm_id },
@@ -185,7 +179,6 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant], r_f
         });
     }
 
-    // Routen-Cache für den aktuellen Standort speichern
     let coord = Coord {
         x: location.longitude,
         y: location.latitude,
@@ -208,7 +201,7 @@ pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant], r_f
     db_for_db.store(false, Ordering::SeqCst);
 
     if !r_for_db.load(Ordering::SeqCst) {
-        println!("🗄️ Datenbank bearbeitung abgeschlossen. Beende Programm...");
+        println!("[+] Datenbank bearbeitung abgeschlossen. Beende Programm...");
         exit(0);
     }
 
