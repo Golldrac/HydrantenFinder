@@ -46,22 +46,6 @@ Da das Projekt als Übungsprojekt und primär für Windows konzipiert wurde, gel
 
 ---
 
-## 🚀 Installation & Start
-
-1. Repository klonen:
-   ```bash
-   git clone https://github.com/dein-benutzername/hydranten-finder.git
-   cd hydranten-finder
-   ```
-2. `.env`-Datei anlegen und API-Schlüssel eintragen.
-3. Lokale MySQL-Datenbank starten und sicherstellen, dass die Datenbank `hydranten_cache` existiert.
-4. Projekt starten:
-   ```bash
-   cargo run --release
-   ```
-
----
-
 ## 💡 Hinweis zum Projektkontext
 
 *Dieses Projekt ist im Rahmen meiner Einarbeitung und zum praktischen Üben in Rust entstanden. Der Fokus lag hierbei primär darauf, verschiedene Technologien (Asynchrones Rust mit Tokio, native Windows-APIs, REST-Schnittstellen, Datenbankanbindung und Bildverarbeitung) miteinander zu verknüpfen und auszuprobieren. Daher liegt der Schwerpunkt hier klar auf der praktischen Umsetzung und dem Ausprobieren neuer Konzepte statt auf perfekten Enterprise-Standards.*
