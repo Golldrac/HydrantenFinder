@@ -276,25 +276,37 @@ impl HydrantShape {
 }
 
 impl HydrantTags {
-    /// Gibt die bekannten Eigenschaften des Hydranten auf der Konsole aus.
-    pub fn output(&self) {
+    /// Gibt die bekannten Eigenschaften des Hydranten zurück.
+    pub fn output(&self) -> String {
+        let mut return_value = String::new();
+
         if let Some(shape) = &self.shape {
-            println!("Es handelt sich um einen {}", shape.to_display_name());
+            return_value.push_str(format!("Es handelt sich um einen {}.\n", shape.to_display_name()).as_str());
         }
         if let Some(diameter) = &self.diameter {
-            println!("Das Rohr hat einen Durchmesser von {}mm", diameter);
+            return_value.push_str(format!("Das Rohr hat einen Durchmesser von {}mm\n", diameter).as_str());
         }
         if let Some(position) = &self.position {
             match position {
-                HydrantPosition::Green => println!("Der Hydrant befindet sich auf einer Grünfläche."),
-                HydrantPosition::Lane => println!("Der Hydrant befindet sich auf der Straße."),
-                HydrantPosition::ParkingLot => println!("Der Hydrant befindet sich auf einem Parkplatz."),
-                HydrantPosition::Sidewalk => println!("Der Hydrant befindet sich auf dem Gehweg."),
+                HydrantPosition::Green => {
+                    return_value.push_str("Der Hydrant befindet sich auf einer Grünfläche.\n");
+
+                },
+                HydrantPosition::Lane => {
+                    return_value.push_str("Der Hydrant befindet sich auf der Straße.\n");
+                },
+                HydrantPosition::ParkingLot => {
+                    return_value.push_str("Der Hydrant befindet sich auf einem Parkplatz.\n");
+                },
+                HydrantPosition::Sidewalk => {
+                    return_value.push_str("Der Hydrant befindet sich auf dem Gehweg.\n");
+                },
             }
         }
 
         if let Some(couplings) = &self.couplings {
-            println!("Der Hydrant hat {} Kupplung(en).", couplings);
+            return_value.push_str(format!("Der Hydrant hat {} Kupplung(en).\n", couplings).as_str());
         }
+        return_value
     }
 }

@@ -24,3 +24,5 @@ mysql = { version = "26.0.0", features = ["chrono"] }
 geohash = "0.13.2"
 chrono = { version = "0.4.45", features = ["serde"] }
 ctrlc = "3.5.1"
+eframe = "0.34.3"
+egui-map-view = "0.6.3"
