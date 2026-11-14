@@ -16,7 +16,7 @@ use tokio::time::{self, sleep, Duration};
 
 use crate::models::{
     Hydrant, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse,
-    RankedHydrant, RouteDetails,
+    HydrantWithRoute, RouteDetails,
 };
 
 /// Der maximale Suchradius in Metern für Hydranten.
@@ -389,9 +389,6 @@ pub async fn fetch_route_ors(
 
 /// Ermittelt den am besten bewerteten Hydranten unter den Kandidaten.
 ///
-/// Die Bewertung erfolgt basierend auf der berechneten Geh-Route (unter Verwendung von `fetch_route_osrm` mit ORS-Fallback)
-/// und den Hydranten-Eigenschaften (`calculate_score`).
-///
 /// Parallelisierung: Die Routenberechnung für jeden Kandidaten erfolgt asynchron und parallel
 /// mithilfe von `tokio::task::spawn`.
 ///
@@ -410,7 +407,7 @@ pub async fn fetch_route_ors(
 ///
 /// # Returns
 ///
-/// Eine sortierte `Vec<RankedHydrant>` mit dem besten (niedrigsten Score) an erster Stelle.
+/// Eine sortierte `Vec<HydrantWithRoute>` mit dem besten (kürzester Weg) an erster Stelle.
 ///
 /// # Errors
 ///
@@ -419,7 +416,7 @@ pub async fn get_closest_by_route(
     user_location: &Location,
     candidate_hydrants: &[Hydrant],
     client: &Client
-) -> Result<Vec<RankedHydrant>> {
+) -> Result<Vec<HydrantWithRoute>> {
     if candidate_hydrants.is_empty() {
         anyhow::bail!("[X] Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
     }
@@ -433,7 +430,7 @@ pub async fn get_closest_by_route(
     pb.set_message("Berechne Routen zu Hydranten...");
     pb.enable_steady_tick(Duration::from_millis(100));
 
-    let all_ranked_hydrants_arc: Arc<Mutex<Vec<RankedHydrant>>> = Arc::new(Mutex::new(Vec::new()));
+    let all_ranked_hydrants_arc: Arc<Mutex<Vec<HydrantWithRoute>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut join_handles = Vec::new();
 
@@ -447,7 +444,7 @@ pub async fn get_closest_by_route(
         let haversine_dist = Haversine.distance(user_location_point, hydrant_point);
 
         if haversine_dist <= PROXIMITY_THRESHOLD_METERS {
-            let candidate = RankedHydrant::new(
+            let candidate = HydrantWithRoute::new(
                 hydrant.clone(),
                 RouteDetails {
                     distance_meters: haversine_dist,
@@ -470,7 +467,7 @@ pub async fn get_closest_by_route(
         let handle = task::spawn(async move {
             match fetch_route_osrm(&client_clone, &user_location_task, &hydrant_clone).await {
                 Ok(details) => {
-                    let candidate = RankedHydrant::new(hydrant_clone, details);
+                    let candidate = HydrantWithRoute::new(hydrant_clone, details);
                     all_ranked_hydrants_clone.lock().unwrap().push(candidate);
                 }
                 Err(e) => {
@@ -517,13 +514,13 @@ pub async fn get_closest_by_route(
     let mut sorted_hydrants = all_ranked_hydrants_arc.lock()
         .expect("Mutex der Ranglisten-Hydranten ist vergiftet beim Entleeren (drain) der Ergebnisse.")
         .drain(..)
-        .collect::<Vec<RankedHydrant>>();
+        .collect::<Vec<HydrantWithRoute>>();
 
     if sorted_hydrants.is_empty() {
         anyhow::bail!("[X] Keine Routen zu Hydranten gefunden, auch nicht per Fallback.");
     }
 
-    sorted_hydrants.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_hydrants.sort_by(|a, b| a.route_details.distance_meters.partial_cmp(&b.route_details.distance_meters).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(sorted_hydrants)
 }
@@ -553,7 +550,7 @@ pub async fn get_closest_by_route(
 pub async fn get_map(
     client: &Client,
     user: &Location,
-    hydrant: &RankedHydrant,
+    hydrant: &HydrantWithRoute,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>> {

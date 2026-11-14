@@ -31,13 +31,13 @@ async fn main() -> Result<()> {
         user_location.longitude
     );
 
-    let mut ranked_hydrants = database::get_ranked_hydrants(&user_location)
+    let mut sorted_hydrants = database::get_cached_hydrant_routes(&user_location)
         .unwrap_or_else(|e| {
             eprintln!("[!] Cache-Fehler: {}. Fahre mit API-Abfrage fort...", e);
             Vec::new()
         });
     let mut db_handle= None;
-    if ranked_hydrants.is_empty(){
+    if sorted_hydrants.is_empty(){
         // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
         let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
 
@@ -47,14 +47,14 @@ async fn main() -> Result<()> {
         }
 
         // 3. Den am besten bewerteten Hydranten per Route (Fußweg) ermitteln und ranken
-        ranked_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
-        let list = ranked_hydrants.clone();
+        sorted_hydrants = api::get_closest_by_route(&user_location, &hydrants, &client).await?;
+        let list = sorted_hydrants.clone();
         let loc = user_location.clone();
         let r_for_db = Arc::clone(&running);
         let db_for_db = Arc::clone(&in_db);
 
         db_handle = Some(tokio::task::spawn_blocking(move || {
-            if let Err(e) = database::save_ranked_hydrants(&loc, &list, &r_for_db, &db_for_db) {
+            if let Err(e) = database::save_hydrant_routes(&loc, &list, &r_for_db, &db_for_db) {
                 eprintln!("[!] Fehler beim Speichern im Cache: {}", e);
             }
         }));
@@ -62,13 +62,12 @@ async fn main() -> Result<()> {
 
     }
 
-    let best_hydrant = &ranked_hydrants[0];
+    let best_hydrant = &sorted_hydrants[0];
 
     // Ausgabe der besten Route
     println!(
-        "[+] Nächster Hydrant gefunden: Distanz: {:.1}m. Score: {:.2}",
-        best_hydrant.route_details.distance_meters,
-        best_hydrant.score
+        "[+] Nächster Hydrant gefunden: Distanz: {:.1}m.",
+        best_hydrant.route_details.distance_meters
     );
 
     // Ausgabe der Hydranten-Tags, falls vorhanden

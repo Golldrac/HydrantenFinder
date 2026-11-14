@@ -185,13 +185,12 @@ pub struct RouteDetails {
 
 /// Ein Hydrant, der nach seiner Routendistanz und Eigenschaften gerankt wurde.
 #[derive(Debug, Clone)]
-pub struct RankedHydrant {
+pub struct HydrantWithRoute {
     /// Die geographische Position des Hydranten.
     pub hydrant: Hydrant,
     /// Die Routendetails vom Benutzer zu diesem Hydranten.
     pub route_details: RouteDetails,
-    /// Der berechnete Score für die Rangliste (kleiner ist besser).
-    pub score: f64,
+
 }
 
 // --- Enums ---
@@ -248,93 +247,20 @@ impl Location {
     }
 }
 
-impl RankedHydrant {
-    /// Erstellt eine neue `RankedHydrant` Instanz und berechnet sofort den Score.
+impl HydrantWithRoute {
+    /// Erstellt eine neue `HydrantWithRoute` Instanz.
     ///
     /// # Arguments
     ///
     /// * `hydrant` - Der Hydrant.
     /// * `route_details` - Die berechneten Routendetails.
     pub fn new(hydrant: Hydrant, route_details: RouteDetails) -> Self {
-        let mut ranked = RankedHydrant {
+        HydrantWithRoute {
             hydrant,
             route_details,
-            score: 0.0, // Temporärer Wert
-        };
-        ranked.score = ranked.calculate_score();
-        ranked
+        }
     }
 
-    /// Berechnet den Score des Hydranten. Ein niedrigerer Score ist besser.
-    ///
-    /// Der Score gewichtet:
-    /// 1. Route/Distanz (quadratisch): Hoher Einfluss, um kurze Strecken zu favorisieren.
-    /// 2. Durchmesser: Kleiner Durchmesser (z.B. < 150mm) erhöht den Score (schlechter).
-    /// 3. Typ (Shape): Überflurhydrant (`Pillar`) ist am besten (negativer Score-Add).
-    /// 4. Position: Parkplatz/Grünfläche sind schlechter als Straße/Gehweg.
-    /// 5. Kupplungen: Mehr als 1 Kupplung ist besser (negativer Score-Add).
-    fn calculate_score(&self) -> f64 {
-        // Standarddurchmesser, wenn Tag fehlt
-        let diameter = if let Some(tags) = &self.hydrant.tags {
-            if let Some(dia_str) = &tags.diameter {
-                // Parse-Fehler ignorieren und Standardwert (80.0mm) verwenden
-                dia_str.parse::<f64>().unwrap_or(80.0)
-            } else {
-                80.0
-            }
-        } else {
-            80.0
-        };
-
-        // Score-Anpassung basierend auf der Bauart
-        let type_add = if let Some(tags) = &self.hydrant.tags {
-            match tags.shape {
-                Some(HydrantShape::Pillar) => -50.0,      // Bester Typ (Überflur)
-                Some(HydrantShape::Pipe) => 30.0,
-                Some(HydrantShape::Wall) => 100.0,
-                Some(HydrantShape::Underground) => 0.0,
-                None => 0.0,
-            }
-        } else {
-            0.0
-        };
-
-        // Score-Anpassung basierend auf der Position
-        let position_add = if let Some(tags) = &self.hydrant.tags {
-            match tags.position {
-                Some(HydrantPosition::Lane) => 0.0,
-                Some(HydrantPosition::Sidewalk) => 0.0,
-                Some(HydrantPosition::ParkingLot) => 30.0, // Schlechter (Zufahrt/Zugriff)
-                Some(HydrantPosition::Green) => 10.0,     // Etwas schlechter (Gelände)
-                None => 5.0,
-            }
-        } else {
-            5.0
-        };
-
-        // Score-Anpassung basierend auf der Anzahl der Kupplungen
-        let couplings_add = if let Some(tags) = &self.hydrant.tags {
-            if let Some(coup_str) = &tags.couplings {
-                let coup_f = coup_str.parse::<i8>().unwrap_or(1);
-                if coup_f >= 2 {
-                    -30.0 // Besser
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
-        // Hauptformel: Distanz (quadratisch gewichtet) + Durchmesser-Einfluss + Typ/Position/Kupplungen
-        ((self.route_details.distance_meters / 100.0).powi(2) * 50.0)
-            + ((150.0 / diameter) * 100.0)
-            + type_add
-            + position_add
-            + couplings_add
-    }
 }
 
 impl HydrantShape {

@@ -10,7 +10,7 @@ use mysql::prelude::*;
 use mysql::*;
 use serde_json;
 
-use crate::models::{CachedRouteItem, Hydrant, HydrantTags, Location, RankedHydrant, RouteDetails};
+use crate::models::{CachedRouteItem, Hydrant, HydrantTags, Location, HydrantWithRoute, RouteDetails};
 
 /// Die Verbindungs-URL zur lokalen MySQL-Datenbank.
 const URL: &str = "mysql://root@localhost:3306/hydranten_cache";
@@ -67,7 +67,7 @@ pub fn get_pool() -> &'static Pool {
 ///
 /// # Errors
 /// Liefert Fehler bei Datenbankproblemen oder Deserialisierungsfehlern von JSON-Daten.
-pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
+pub fn get_cached_hydrant_routes(location: &Location) -> Result<Vec<HydrantWithRoute>> {
     let coord = Coord {
         x: location.longitude,
         y: location.latitude,
@@ -126,7 +126,7 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
                 geometry_polyline: item.polyline,
             };
 
-            ranked_hydrants.push(RankedHydrant::new(hydrant, details));
+            ranked_hydrants.push(HydrantWithRoute::new(hydrant, details));
         }
     }
 
@@ -139,7 +139,7 @@ pub fn get_ranked_hydrants(location: &Location) -> Result<Vec<RankedHydrant>> {
 ///
 /// # Errors
 /// Gibt einen Fehler zurück, wenn die Serialisierung fehlschlägt oder die Datenbank nicht erreichbar ist.
-pub fn save_ranked_hydrants(location: &Location, hydrants: &[RankedHydrant], r_for_db: &Arc<AtomicBool>, db_for_db: &Arc<AtomicBool>) -> Result<()> {
+pub fn save_hydrant_routes(location: &Location, hydrants: &[HydrantWithRoute], r_for_db: &Arc<AtomicBool>, db_for_db: &Arc<AtomicBool>) -> Result<()> {
 
     db_for_db.store(true, Ordering::SeqCst);
 
