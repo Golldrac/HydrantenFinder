@@ -32,6 +32,12 @@ const MAX_ZOOM: u32 = 18;
 /// Die Standardanzahl an zurückzugebenden Hydranten, falls kein Limit angegeben wurde.
 const DEFAULT_HYDRANT_LIMIT: usize = 5;
 
+const OVERPASS_ENDPOINTS: &[&str] = &[
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+];
+
 // --- Hydranten-Suche (Overpass) ---
 
 /// Ruft Hydranten im angegebenen Radius um die übergebene Position von der Overpass API ab.
@@ -53,12 +59,10 @@ const DEFAULT_HYDRANT_LIMIT: usize = 5;
 ///
 /// Gibt einen Fehler zurück, wenn die Overpass API nach allen Retries einen nicht erfolgreichen Statuscode zurückgibt.
 pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &Client) -> Result<Vec<Hydrant>> {
-
     let lat = location.latitude;
     let lon = location.longitude;
     let mut radius_m = initial_radius_m;
-    let mut attempt = 1;
-    let base_delay = Duration::from_millis(1300);
+    let mut radius_attempt = 0;
 
     loop {
         let query = format!(
@@ -70,71 +74,56 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &
             radius_m, lat, lon
         );
 
-        let url = "https://overpass-api.de/api/interpreter";
+        let mut last_err = None;
+        let mut response_opt = None;
 
-        let response = retry_on_failure(
-            || {
-                let client_clone = client.clone();
-                let url_clone = url;
-                let query_clone = query.clone();
+        for &url in OVERPASS_ENDPOINTS {
+            let res = retry_on_failure(
+                || {
+                    let client_clone = client.clone();
+                    let query_clone = query.clone();
 
-                async move {
-                    client_clone
-                        .post(url_clone)
-                        .body(query_clone)
-                        .send()
-                        .await
-                        .map_err(anyhow::Error::from)
+                    async move {
+                        let resp = client_clone
+                            .post(url)
+                            .body(query_clone)
+                            .send()
+                            .await?;
+                        resp.error_for_status().map_err(anyhow::Error::from)
+                    }
+                },
+                3,
+                Duration::from_secs(2),
+            )
+                .await;
+
+            match res {
+                Ok(r) => {
+                    response_opt = Some(r);
+                    break;
                 }
-            },
-            4,
-            Duration::from_secs(3),
-        )
-            .await;
-
-        let response = match response {
-            Ok(r) => r,
-            Err(e) => {
-                anyhow::bail!("[X] Overpass-API-Aufruf fehlgeschlagen: {}", e);
+                Err(e) => {
+                    eprintln!("[!] Endpoint {} fehlgeschlagen, wechsle Mirror...", url);
+                    last_err = Some(e);
+                }
             }
-        };
-
-        if !response.status().is_success() {
-            let status = response.status();
-
-            if status ==  reqwest::StatusCode::GATEWAY_TIMEOUT{
-                let delay = base_delay * (2_i32.pow(attempt) as u32);
-                sleep(delay).await;
-                continue;
-            }
-
-            let body = response
-                .text()
-                .await
-                .context("Overpass: Kein Antwort-Body verfügbar")?;
-
-            anyhow::bail!(
-                "[X] Overpass-API-Fehler (Status: {}). Antwort: {}",
-                status,
-                body
-            );
         }
 
-        let response_body = response.json::<LocationResponse>().await?;
+        let response = match response_opt {
+            Some(r) => r,
+            None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("[X] Alle Overpass-Endpoints fehlgeschlagen."))),
+        };
 
+        let response_body = response.json::<LocationResponse>().await?;
         let hydrants = response_body.elements;
 
         if hydrants.len() >= 5 || radius_m >= MAX_RADIUS {
-
             return Ok(hydrants);
-
         }
 
-        let delay = base_delay * (2_i32.pow(attempt) as u32);
-        radius_m = min(initial_radius_m * (2_i32.pow(attempt) as u32), MAX_RADIUS);
-        sleep(delay).await;
-        attempt += 1;
-
+        radius_attempt += 1;
+        radius_m = min(initial_radius_m * (2_u32.pow(radius_attempt)), MAX_RADIUS);
+        sleep(Duration::from_millis(1300)).await;
     }
 }
 
@@ -642,24 +631,38 @@ pub async fn get_map(
         }
     };
 
-    if response.status().is_success() {
-        // Korrekt: Bilddaten als Bytes abrufen
-        let bytes = response.bytes().await?.to_vec();
-        return Ok(bytes);
-    } else {
-        // Fehlerfall: Nur den Statuscode ausgeben, nicht den (binären) Body
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
+
+
+    if content_type.starts_with("image/") {
+        if let Ok(bytes) = response.bytes().await {
+            if status == 200 {
+                return Ok(bytes.to_vec());
+            }
+            let _ = std::fs::write("stadia_error.png", &bytes);
+        }
         anyhow::bail!(
-            "[X] Stadia-Maps-API-Fehler (Status: {}). Antwort: {}",
-            status,
-            body
-        );
+        "[X] Stadia-Maps-API-Fehler (Status: {}, Antwort ist ein Fehlerbild; gespeichert als stadia_error.png)",
+        status
+    );
     }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
+
+    anyhow::bail!(
+    "[X] Stadia-Maps-API-Fehler (Status: {}). Antwort: {}",
+    status,
+    body
+);
 
 }
 

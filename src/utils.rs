@@ -15,11 +15,6 @@ use windows::Devices::Geolocation::{
 };
 use windows::Foundation::TimeSpan;
 use windows_future::IAsyncOperation;
-#[cfg(windows)]
-use windows_sys::Win32::System::Console::{
-    GetStdHandle, GetConsoleMode, SetConsoleMode,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE
-};
 
 /// Konvertiert Sekunden in die 100-Nanosekunden-Einheit, die für `TimeSpan::Duration` benötigt wird.
 const DURATION_FACTOR: i64 = 10_000_000; // 1 Sekunde = 10 Millionen * 100ns
