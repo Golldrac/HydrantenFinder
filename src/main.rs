@@ -11,23 +11,20 @@ use tokio::io::AsyncWriteExt;
 use crate::gui::AppState;
 use crate::utils::init_app;
 
-fn set_status(status: &Arc<Mutex<String>>, text: impl Into<String>) {
-    *status.lock().unwrap() = text.into();
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let status = Arc::new(Mutex::new(String::from("Starten ...")));
     let mut state = Arc::new(Mutex::new(AppState::default()));
 
     // Hintergrund-Task für Standort- und Hydrantensuche starten
-    let bg_status = Arc::clone(&status);
     let value = state.clone();
     tokio::spawn(async move {
         let mut value = value.clone();
-        if let Err(e) = run_search(&bg_status, &mut value).await {
-            eprintln!("[!] Fehler: {e}");
-            set_status(&bg_status, format!("Fehler aufgetreten:\n{e}"));
+        if let Err(e) = run_search(&mut value).await {
+            eprintln!("[!] Fehler: {e:#}");
+            let mut s = value.lock().unwrap();
+            s.set_error_banner(true);
+            s.set_loading(false);
+            s.set_error_msg(format!("Fehler aufgetreten:\n{e}"));
         }
     });
 
@@ -44,22 +41,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_search(status: &Arc<Mutex<String>>, state: &mut Arc<Mutex<AppState>>) -> Result<()> {
+async fn run_search(state: &mut Arc<Mutex<AppState>>) -> Result<()> {
     let (client, running, in_db) = init_app()?;
-    {
-        let mut s = state.lock().unwrap();
-        s.status = format!("Suche Standort");
-    }
 
 
     // 1. Benutzerkoordinaten abrufen
     let user_location = utils::get_user_coordinates().await?;
-
     {
         let mut s = state.lock().unwrap();
-        s.status = format!("Standort gefunden: Breite={}, Länge={}", user_location.latitude, user_location.longitude);
-        s.show_map = true;
+        s.set_user_loc(user_location);
     }
+
     println!(
         "[+] Standort gefunden: Breite={}, Länge={}.",
         user_location.latitude, user_location.longitude
@@ -73,12 +65,6 @@ async fn run_search(status: &Arc<Mutex<String>>, state: &mut Arc<Mutex<AppState>
 
     let mut db_handle = None;
     if sorted_hydrants.is_empty() {
-        {
-            let mut s = state.lock().unwrap();
-            s.status = format!(
-                "Standort gefunden: Breite={}, Länge={}.\nKeine passenden Hydranten im Cache. Nutze API",
-                user_location.latitude, user_location.longitude);
-        }
 
         // 2. Die 5 nächstgelegenen Hydranten (Luftlinie) finden
         let hydrants = api::get_nearest_hydrants(&user_location, Some(5), &client).await?;
@@ -86,9 +72,9 @@ async fn run_search(status: &Arc<Mutex<String>>, state: &mut Arc<Mutex<AppState>
         if hydrants.is_empty() {
             {
                 let mut s = state.lock().unwrap();
-                s.status = "Suche fehlgeschlagen.".into();
-                s.show_spinner = false;
-                s.show_error_banner = true;
+               s.set_error_banner(true);
+                s.set_loading(false);
+                s.set_error_msg("Suche fehlgeschlagen.".into());
             }
             println!("[-] Keine Hydranten in der Nähe gefunden.");
             return Ok(());
@@ -109,6 +95,10 @@ async fn run_search(status: &Arc<Mutex<String>>, state: &mut Arc<Mutex<AppState>
     }
 
     let best_hydrant = &sorted_hydrants[0];
+    {
+        let mut s = state.lock().unwrap();
+        s.set_hydrants(sorted_hydrants.clone());
+    }
 
     println!(
         "[+] Nächster Hydrant gefunden: Distanz: {:.1}m.",
@@ -119,22 +109,13 @@ async fn run_search(status: &Arc<Mutex<String>>, state: &mut Arc<Mutex<AppState>
         println!("{}", tags.output());
         {
             let mut s = state.lock().unwrap();
-            s.status = format!(
-                "Nächster Hydrant gefunden!\nDistanz: {:.1} m.\n{}",
-                best_hydrant.route_details.distance_meters,
-                tags.output()
-            );
-            s.show_spinner = false;
+            s.set_loading(false);
         }
 
     }else {
         {
             let mut s = state.lock().unwrap();
-            s.status = format!(
-                "Nächster Hydrant gefunden!\nDistanz: {:.1} m.",
-                best_hydrant.route_details.distance_meters
-            );
-            s.show_spinner = false;
+            s.set_loading(false);
         }
     }
 

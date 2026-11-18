@@ -125,7 +125,7 @@ pub struct MapRequest {
 /// Repräsentiert eine geographische Position (Breite und Länge).
 ///
 /// Wird für die Position des Benutzers oder eines Hydranten verwendet.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub struct Location {
     /// Die Länge (Longitude) der Position.
     #[serde(rename = "lon")]

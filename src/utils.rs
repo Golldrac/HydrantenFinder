@@ -177,7 +177,7 @@ pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
 
     ctrlc::set_handler(move || {
         if db_sig.load(Ordering::SeqCst) {
-            println!("🗄️ Datenbank aktiv. Beende nach Abschluss...");
+            println!("[+] Datenbank aktiv. Beende nach Abschluss...");
             r_sig.store(false, Ordering::SeqCst);
         } else {
             exit(0);
