@@ -1,14 +1,12 @@
-use crate::models::Location;
+use crate::models::{Hydrant, Location};
 use anyhow::Result;
-use image::GenericImageView;
-use indicatif::{ProgressBar, ProgressStyle};
-use minifb::{Key, Window, WindowOptions};
-use std::path::Path;
 use std::process::exit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use dotenvy::dotenv;
+use geo::{Distance, Haversine};
+use geo_types::Point;
 use reqwest::Client;
 use windows::Devices::Geolocation::{
     Geocoordinate, GeolocationAccessStatus, Geolocator, Geoposition, PositionAccuracy,
@@ -24,12 +22,12 @@ const MAX_AGE_DURATION_NANOS: i64 = 5 * 60 * DURATION_FACTOR;
 
 /// Der Timeout für die Positionsanforderung (5 Sekunden).
 const TIMEOUT_DURATION_NANOS: i64 = 5 * DURATION_FACTOR;
-
-/// Der Skalierungsfaktor, der auf das geladene Bild angewendet wird.
-///
-/// Ein Wert unter 1.0 bewirkt ein Herauszoomen (Bild wird verkleinert, um auf den Bildschirm zu passen),
-/// während ein Wert über 1.0 ein Hineinzoomen bewirkt.
-const SCALE_FACTOR: f32 = 0.6;
+/// Der maximale Abstand in Metern, bei dem ein Hydrant als "erreicht" gilt und keine Routenberechnung nötig ist.
+pub const PROXIMITY_THRESHOLD_METERS: f64 = 5.0;
+/// Die Breite der generierten statischen Karte in Pixeln (für Zoom-Berechnung).
+const MAP_WIDTH_PIXELS: f64 = 800.0;
+/// Der maximale Zoomlevel für die Stadia Maps API.
+const MAX_ZOOM: u8 = 32;
 
 /// Ruft die aktuellen geographischen Koordinaten des Benutzers über die Windows Geolocation API ab.
 ///
@@ -76,84 +74,39 @@ pub async fn get_user_coordinates() -> Result<Location> {
     }
 }
 
-/// Lädt ein Bild von einem Pfad, skaliert es (entsprechend `SCALE_FACTOR`)
-/// und zeigt es in einem `minifb`-Fenster an.
+/// Berechnet einen geeigneten Zoomlevel für die statische Karte,
+/// sodass beide Standorte auf die Karte passen.
 ///
-/// Während der Lade- und Konvertierungsphase wird ein Konsolen-Spinner angezeigt.
+/// Nutzt eine Näherungsformel, die auf der horizontalen Distanz zwischen den Punkten basiert.
 ///
 /// # Arguments
 ///
-/// * `file_path` - Der Pfad zur Bilddatei (z.B. "hydrant_route.png").
+/// * `loc1` - Die erste Position (z.B. Benutzer).
+/// * `loc2` - Die zweite Position (z.B. Hydrant).
 ///
-/// # Errors
+/// # Returns
 ///
-/// Gibt einen Fehler zurück, wenn das Bild nicht geladen/dekodiert werden kann oder
-/// `minifb`-Operationen fehlschlagen.
-pub fn show_image_in_minifb(file_path: &str) -> Result<()> {
-    let spinner_style = ProgressStyle::with_template("{spinner} {msg}")?
-        .tick_chars("|/-\\ ");
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(spinner_style);
-    pb.set_message("Lade und berechne Bildpuffer...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+/// Der berechnete Zoomlevel als `u32`, begrenzt auf $0$ bis $18$.
+pub fn calculate_zoom_level(loc1: &Location, loc2: &Hydrant) -> u8 {
 
-    let img = image::open(Path::new(file_path))?;
+    let p1 = Point::new(loc1.longitude, loc1.latitude);
+    let p2 = Point::new(loc2.longitude, loc2.latitude);
+    let distance_m = Haversine.distance(p1, p2);
 
-    let new_width = (img.width() as f32 * SCALE_FACTOR) as u32;
-    let new_height = (img.height() as f32 * SCALE_FACTOR) as u32;
-
-    let resized_img =
-        img.resize_exact(new_width, new_height, image::imageops::FilterType::Nearest);
-
-    let width = resized_img.width() as usize;
-    let height = resized_img.height() as usize;
-
-    let mut buffer: Vec<u32> = vec![0; width * height];
-
-    for (x, y, pixel) in resized_img.pixels() {
-        let (r, g, b, a) = match pixel.0.len() {
-            4 => (
-                pixel.0[0] as u32,
-                pixel.0[1] as u32,
-                pixel.0[2] as u32,
-                pixel.0[3] as u32,
-            ),
-            3 => (
-                pixel.0[0] as u32,
-                pixel.0[1] as u32,
-                pixel.0[2] as u32,
-                255u32,
-            ),
-            _ => continue,
-        };
-
-        let color = (a << 24) | (r << 16) | (g << 8) | b;
-
-        let index = (y as usize) * width + (x as usize);
-        buffer[index] = color;
+    if distance_m <= PROXIMITY_THRESHOLD_METERS {
+        return MAX_ZOOM;
     }
 
-    pb.finish();
-    println!("[+] Route gespeichert und Karte wird geöffnet: {}.", file_path);
+    let fraction_of_map = 0.4;
+    let meters_per_pixel = distance_m / (MAP_WIDTH_PIXELS * fraction_of_map);
 
-    let mut window = Window::new(
-        "Route (ESC zum Schließen)",
-        width,
-        height,
-        WindowOptions {
-            scale: minifb::Scale::FitScreen,
-            ..WindowOptions::default()
-        },
-    )?;
+    let mid_lat_rad = (loc1.latitude.to_radians() + loc2.latitude.to_radians()) / 2.0;
+    let earth_circumference = 40_075_016.7;
+    let zoom_f64 = (earth_circumference * mid_lat_rad.cos() / (256.0 * meters_per_pixel)).log2() * 1.1;
 
-    window.set_target_fps(60);
+    let final_zoom = zoom_f64.floor() as u8;
 
-
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        window.update_with_buffer(&buffer, width, height)?;
-    }
-
-    Ok(())
+    final_zoom.clamp(0, MAX_ZOOM)
 }
 
 /// Initialisiert die Anwendung (Umgebungsvariablen und Terminal-Einstellungen)

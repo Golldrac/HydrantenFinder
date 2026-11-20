@@ -247,6 +247,12 @@ impl Location {
     }
 }
 
+impl Hydrant{
+    pub fn get_location(&self) -> Location{
+        Location::new(self.latitude, self.longitude)
+    }
+}
+
 impl HydrantWithRoute {
     /// Erstellt eine neue `HydrantWithRoute` Instanz.
     ///

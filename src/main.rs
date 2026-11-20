@@ -1,3 +1,5 @@
+#![feature(let_chains)]
+
 mod api;
 mod models;
 mod utils;
@@ -94,39 +96,13 @@ async fn run_search(state: &mut Arc<Mutex<AppState>>) -> Result<()> {
         }));
     }
 
-    let best_hydrant = &sorted_hydrants[0];
     {
         let mut s = state.lock().unwrap();
         s.set_hydrants(sorted_hydrants.clone());
+        s.set_loading(false);
     }
 
-    println!(
-        "[+] Nächster Hydrant gefunden: Distanz: {:.1}m.",
-        best_hydrant.route_details.distance_meters
-    );
 
-    if let Some(tags) = best_hydrant.hydrant.tags.clone() {
-        println!("{}", tags.output());
-        {
-            let mut s = state.lock().unwrap();
-            s.set_loading(false);
-        }
-
-    }else {
-        {
-            let mut s = state.lock().unwrap();
-            s.set_loading(false);
-        }
-    }
-
-    // 4. Statische Karte erstellen und speichern
-    let file_path = "hydrant_route.png";
-    let map_bytes = api::get_map(&client, &user_location, best_hydrant, 800, 600).await?;
-    let mut file = File::create(file_path).await?;
-    file.write_all(&map_bytes).await?;
-
-    // Starte die Anzeige in einer blockierenden Task
-    tokio::task::spawn_blocking(move || utils::show_image_in_minifb(file_path)).await??;
     if let Some(handle) = db_handle {
         let _ = handle.await;
     }

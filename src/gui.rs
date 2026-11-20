@@ -2,13 +2,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use eframe::egui;
 use egui_map_view::{config::OpenStreetMapConfig, Map};
+use crate::utils::calculate_zoom_level;
 use crate::models::{HydrantWithRoute, Location};
 
 pub struct AppState {
-    //pub status: String,
     is_loading: bool,
-    //pub show_spinner: bool,
-    //pub show_map: bool,
     show_error_banner: bool,
     error_msg: String,
     user_loc: Option<Location>,
@@ -19,10 +17,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            //status: String::from("Starten ..."),
             is_loading: true,
-            //show_spinner: true,
-            //show_map: false,
             show_error_banner: false,
             error_msg: "Unbekannter Fehler!".into(),
             user_loc: None,
@@ -131,8 +126,14 @@ impl eframe::App for MyEguiApp {
             }
 
             if !is_loading && !show_error_banner {
-                ui.add_space(10.0);
-                ui.add(&mut self.map);
+                ui.add_sized(ui.available_size_before_wrap(), &mut self.map);
+                if let Some(user) = user_loc && hydrants.len() >= 1{
+                    let zoom = calculate_zoom_level(&user, &hydrants[0].hydrant);
+                    self.map.zoom = zoom;
+                    self.map.center.lat = user.latitude;
+                    self.map.center.lon = user.longitude;
+                }
+
             }
         });
     }

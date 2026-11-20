@@ -14,6 +14,7 @@ use serde_json;
 use tokio::task;
 use tokio::time::{self, sleep, Duration};
 
+use crate::utils::PROXIMITY_THRESHOLD_METERS;
 use crate::models::{
     Hydrant, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse,
     HydrantWithRoute, RouteDetails,
@@ -23,12 +24,6 @@ use crate::models::{
 const MAX_RADIUS: u32 = 1_500;
 /// Die Genauigkeit, mit der Polylines kodiert werden sollen.
 const POLYLINE_PRECISION: u32 = 6;
-/// Der maximale Abstand in Metern, bei dem ein Hydrant als "erreicht" gilt und keine Routenberechnung nötig ist.
-const PROXIMITY_THRESHOLD_METERS: f64 = 5.0;
-/// Die Breite der generierten statischen Karte in Pixeln (für Zoom-Berechnung).
-const MAP_WIDTH_PIXELS: f64 = 800.0;
-/// Der maximale Zoomlevel für die Stadia Maps API.
-const MAX_ZOOM: u32 = 18;
 /// Die Standardanzahl an zurückzugebenden Hydranten, falls kein Limit angegeben wurde.
 const DEFAULT_HYDRANT_LIMIT: usize = 5;
 
@@ -523,179 +518,6 @@ pub async fn get_closest_by_route(
     sorted_hydrants.sort_by(|a, b| a.route_details.distance_meters.partial_cmp(&b.route_details.distance_meters).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(sorted_hydrants)
-}
-
-// --- Karten-Generierung (Stadia Maps) ---
-
-/// Ruft eine statische Karte von der Stadia Maps API ab, die die Route anzeigt.
-///
-/// Führt interne Retries bei transienten Fehlern durch. Die Route wird im
-/// Request-Body als JSON übermittelt.
-///
-/// # Arguments
-///
-/// * `user` - Die Position des Benutzers (roter Marker).
-/// * `hydrant` - Der beste gerankte Hydrant (blauer Marker mit 'H').
-/// * `width` - Die gewünschte Breite der Karte in Pixeln.
-/// * `height` - Die gewünschte Höhe der Karte in Pixeln.
-///
-/// # Returns
-///
-/// Die Bilddaten der Karte als `Vec<u8>` (PNG-Format).
-///
-/// # Errors
-///
-/// Gibt einen Fehler zurück, wenn die `STADIAMAPS_API_KEY` Umgebungsvariable fehlt oder
-/// die API nach allen Retries einen Fehlerstatus zurückgibt.
-pub async fn get_map(
-    client: &Client,
-    user: &Location,
-    hydrant: &HydrantWithRoute,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>> {
-    let api_key = env::var("STADIAMAPS_API_KEY")
-        .context("[X] STADIAMAPS_API_KEY Umgebungsvariable muss gesetzt sein. Kartenerstellung nicht möglich.")?;
-
-    let hydrant_loc = &hydrant.hydrant;
-    let polyline_str = &hydrant.route_details.geometry_polyline;
-    let zoom = calculate_zoom_level(user, hydrant_loc);
-
-    let center_lat = (user.latitude + hydrant_loc.latitude) / 2f64;
-    let center_lon = (user.longitude + hydrant_loc.longitude) / 2f64;
-
-    let request_body = MapRequest {
-        center: format!("{},{}", center_lat, center_lon),
-        size: format!("{}x{}@2x", width, height),
-        zoom,
-        markers: vec![
-            // Benutzer-Marker (rot)
-            MapMarker {
-                lat: user.latitude,
-                lon: user.longitude,
-                color: Some("red".to_string()),
-                label: None,
-            },
-            // Hydrant-Marker (blau mit 'H')
-            MapMarker {
-                lat: hydrant_loc.latitude,
-                lon: hydrant_loc.longitude,
-                color: Some("blue".to_string()),
-                label: Some("H".to_string()),
-            },
-        ],
-        lines: if polyline_str.is_empty() {
-            vec![]
-        } else {
-            vec![MapLine {
-                shape: polyline_str.clone(),
-                stroke_color: Some("red".to_string()),
-                stroke_width: Some(5),
-            }]
-        },
-    };
-
-    let url = format!(
-        "https://tiles.stadiamaps.com/static_cacheable/alidade_smooth.png?api_key={}",
-        api_key
-    );
-
-    let response = retry_on_failure(
-        || {
-            let client_clone = client.clone();
-            let url_clone = url.clone();
-            let request_body_clone = request_body.clone();
-
-            async move {
-                client_clone
-                    .post(&url_clone)
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .json(&request_body_clone)
-                    .send()
-                    .await
-                    .map_err(anyhow::Error::from)
-            }
-        },
-        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
-        Duration::from_secs(2),
-    )
-        .await;
-
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            anyhow::bail!("[X] Stadia-Maps-API-Aufruf fehlgeschlagen: {}", e);
-        }
-    };
-
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-
-
-    if content_type.starts_with("image/") {
-        if let Ok(bytes) = response.bytes().await {
-            if status == 200 {
-                return Ok(bytes.to_vec());
-            }
-            let _ = std::fs::write("stadia_error.png", &bytes);
-        }
-        anyhow::bail!(
-        "[X] Stadia-Maps-API-Fehler (Status: {}, Antwort ist ein Fehlerbild; gespeichert als stadia_error.png)",
-        status
-    );
-    }
-
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Kein Antwort-Body verfügbar".to_string());
-
-    anyhow::bail!(
-    "[X] Stadia-Maps-API-Fehler (Status: {}). Antwort: {}",
-    status,
-    body
-);
-
-}
-
-/// Berechnet einen geeigneten Zoomlevel für die statische Karte,
-/// sodass beide Standorte auf die Karte passen.
-///
-/// Nutzt eine Näherungsformel, die auf der horizontalen Distanz zwischen den Punkten basiert.
-///
-/// # Arguments
-///
-/// * `loc1` - Die erste Position (z.B. Benutzer).
-/// * `loc2` - Die zweite Position (z.B. Hydrant).
-///
-/// # Returns
-///
-/// Der berechnete Zoomlevel als `u32`, begrenzt auf $0$ bis $18$.
-pub fn calculate_zoom_level(loc1: &Location, loc2: &Hydrant) -> u32 {
-
-    let p1 = Point::new(loc1.longitude, loc1.latitude);
-    let p2 = Point::new(loc2.longitude, loc2.latitude);
-    let distance_m = Haversine.distance(p1, p2);
-
-    if distance_m <= PROXIMITY_THRESHOLD_METERS {
-        return MAX_ZOOM;
-    }
-
-    let fraction_of_map = 0.4;
-    let meters_per_pixel = distance_m / (MAP_WIDTH_PIXELS * fraction_of_map);
-
-    let mid_lat_rad = (loc1.latitude.to_radians() + loc2.latitude.to_radians()) / 2.0;
-    let earth_circumference = 40_075_016.7;
-    let zoom_f64 = (earth_circumference * mid_lat_rad.cos() / (256.0 * meters_per_pixel)).log2();
-
-    let final_zoom = zoom_f64.floor() as u32 -1;
-
-    final_zoom.clamp(0, MAX_ZOOM)
 }
 
 // --- Hilfsfunktionen (Retry) ---
