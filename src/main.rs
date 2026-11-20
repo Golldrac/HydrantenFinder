@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use crate::gui::AppState;
 use crate::utils::init_app;
 
+//TODO: Retrylogik
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut state = Arc::new(Mutex::new(AppState::default()));

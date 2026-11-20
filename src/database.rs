@@ -95,7 +95,7 @@ pub fn get_cached_hydrant_routes(location: &Location) -> Result<Vec<HydrantWithR
         println!("[!] Cache-Eintrag für Geohash {} ist veraltet.", geohash);
         return Ok(Vec::new());
     }
-    
+
 
     let cached_items: Vec<CachedRouteItem> = serde_json::from_str(&cached_routes_json)?;
     let mut ranked_hydrants = Vec::with_capacity(cached_items.is_empty().then_some(0).unwrap_or(cached_items.len()));

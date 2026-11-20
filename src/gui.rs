@@ -23,6 +23,7 @@ impl Layer for DrawLayer {
 //Mögliche fraben: BLACK, DARK_GRAY, GRAY, LIGHT_GRAY, WHITE, BROWN, DARK_RED, RED, LIGHT_RED, CYAN, MAGENTA, YELLOW, ORANGE, LIGHT_YELLOW, KHAKI, DARK_GREEN, GREEN, LIGHT_GREEN, DARK_BLUE, BLUE, LIGHT_BLUE, PURPLE, GOLD, from_rgb()
     fn draw(&self, painter: &egui::Painter, projection: &MapProjection) {
         for i in 0..self.polylines.len() {
+            //TODO: Luftlinie als Fallback
             let hyd_lines = &self.polylines[i];
             let col = &self.hydrants[i].color;
             for j in 1 .. hyd_lines.len() {
@@ -158,6 +159,7 @@ impl AppState {
 
     pub fn set_hydrants(&mut self, hydrants: Vec<HydrantWithRoute>){
         //Mögliche fraben: BLACK, DARK_GRAY, GRAY, LIGHT_GRAY, WHITE, BROWN, DARK_RED, RED, LIGHT_RED, CYAN, MAGENTA, YELLOW, ORANGE, LIGHT_YELLOW, KHAKI, DARK_GREEN, GREEN, LIGHT_GREEN, DARK_BLUE, BLUE, LIGHT_BLUE, PURPLE, GOLD, from_rgb()
+        //TODO: Bessere Farbauswahl
         let available_colors = [Color32::RED, Color32::BLUE, Color32::MAGENTA, Color32::ORANGE, Color32::CYAN, Color32::GREEN];
         self.hydrants = hydrants;
         self.zoom_needs_update = true;
@@ -228,11 +230,13 @@ impl eframe::App for MyEguiApp {
         if !is_loading && !show_error_banner {
 
             egui::TopBottomPanel::top("top_panel").show_inside(ui, |ui| {
+                //TODO
                 ui.heading("Top Panel Zeug");
             });
             egui::SidePanel::right("side_panel").show_inside(ui, |ui| {
                 ui.heading("Hydranten");
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    //TODO: Schöner und cklickbar
                     for i in 0.. hydrants.len()  {
                         let hydrant = &hydrants[i];
                         ui.colored_label(hydrants[i].color, hydrants[i].hydrant.tags.as_ref().expect("Keine Infos zu diesem Hydranten").output());
@@ -246,6 +250,7 @@ impl eframe::App for MyEguiApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if is_loading {
+                    //TODO: Schöner
                     ui.spinner();
                     ui.heading("Loading ...");
                 }
