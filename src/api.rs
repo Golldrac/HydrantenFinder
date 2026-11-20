@@ -2,7 +2,6 @@ use std::cmp::min;
 use std::env;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-
 use anyhow::{Context, Result};
 use geo::{Distance, Haversine, Point};
 use geo_types::Coord;
@@ -23,7 +22,7 @@ use crate::models::{
 /// Der maximale Suchradius in Metern für Hydranten.
 const MAX_RADIUS: u32 = 1_500;
 /// Die Genauigkeit, mit der Polylines kodiert werden sollen.
-const POLYLINE_PRECISION: u32 = 6;
+pub const POLYLINE_PRECISION: u32 = 6;
 /// Die Standardanzahl an zurückzugebenden Hydranten, falls kein Limit angegeben wurde.
 const DEFAULT_HYDRANT_LIMIT: usize = 5;
 

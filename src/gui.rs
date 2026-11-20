@@ -1,9 +1,119 @@
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use eframe::egui::Color32;
 use eframe::egui;
-use egui_map_view::{config::OpenStreetMapConfig, Map};
+use eframe::egui::Response;
+use eframe::epaint::PathStroke;
+use egui_map_view::{config::OpenStreetMapConfig, Map, layers::{svg, Layer}, projection};
+use egui_map_view::projection::{GeoPos, MapProjection};
+use geo_types::Coord;
 use crate::utils::calculate_zoom_level;
 use crate::models::{HydrantWithRoute, Location};
+use crate::api::POLYLINE_PRECISION;
+
+
+struct DrawLayer {
+    user_loc: Option<Location>,
+    hydrants: Vec<HydrantWithRoute>,
+    polylines: Vec<Vec<Coord>>,
+}
+
+impl Layer for DrawLayer {
+//Mögliche fraben: BLACK, DARK_GRAY, GRAY, LIGHT_GRAY, WHITE, BROWN, DARK_RED, RED, LIGHT_RED, CYAN, MAGENTA, YELLOW, ORANGE, LIGHT_YELLOW, KHAKI, DARK_GREEN, GREEN, LIGHT_GREEN, DARK_BLUE, BLUE, LIGHT_BLUE, PURPLE, GOLD, from_rgb()
+    fn draw(&self, painter: &egui::Painter, projection: &MapProjection) {
+        for i in 0..self.polylines.len() {
+            let hyd_lines = &self.polylines[i];
+            let col = &self.hydrants[i].color;
+            for j in 1 .. hyd_lines.len() {
+                let screen_pos_1 = projection.project(GeoPos{
+                    lat: hyd_lines[j].y,
+                    lon: hyd_lines[j].x
+                });
+                let screen_pos_2 = projection.project(GeoPos{
+                    lat: hyd_lines[j-1].y,
+                    lon: hyd_lines[j-1].x
+                });
+                painter.line([screen_pos_1, screen_pos_2].to_vec(), PathStroke::new(9.0 - (i as f32 *2.0), *col));
+            }
+
+        }
+
+
+        if let Some(loc) = &self.user_loc {
+            let pos = GeoPos {
+                lat: loc.latitude,
+                lon: loc.longitude,
+            };
+
+            let screen_pos = projection.project(pos);
+            painter.circle(
+                screen_pos,
+                7.0,
+                Color32::BLACK,
+                egui::Stroke::new(2.0, Color32::BLACK),
+            );
+        }
+
+
+        for hydrant in &self.hydrants {
+            let pos = GeoPos {
+                lat: hydrant.hydrant.latitude,
+                lon:  hydrant.hydrant.longitude,
+            };
+
+            let screen_pos = projection.project(pos);
+            painter.circle(
+                screen_pos,
+                7.0,
+                hydrant.color,
+                egui::Stroke::new(2.0, hydrant.color),
+            );
+        }
+
+    }
+    fn handle_input(&mut self, _response: &egui::Response, _projection: &MapProjection) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+}
+
+impl DrawLayer {
+    fn new()-> DrawLayer {
+        DrawLayer {
+            user_loc: None,
+            hydrants: Vec::new(),
+            polylines: Vec::new(),
+        }
+    }
+
+    fn set_user_loc(&mut self, user_loc: Location){
+        self.user_loc = Some(user_loc);
+    }
+
+    fn set_hydrants(&mut self, hydrants: Vec<HydrantWithRoute>) {
+        self.polylines.clear();
+        self.hydrants = hydrants;
+
+        for hydrant in &self.hydrants {
+            let poly_str = &hydrant.route_details.geometry_polyline;
+            if !poly_str.is_empty() {
+                if let Ok(line_string) = polyline::decode_polyline(poly_str, POLYLINE_PRECISION) {
+                    self.polylines.push(line_string.0);
+                }
+            }
+        }
+    }
+}
+
 
 pub struct AppState {
     is_loading: bool,
@@ -12,6 +122,8 @@ pub struct AppState {
     user_loc: Option<Location>,
     hydrants: Vec<HydrantWithRoute>,
     current_hydrant: Option<usize>,
+    center_needs_update: bool,
+    zoom_needs_update: bool,
 }
 
 impl Default for AppState {
@@ -23,6 +135,8 @@ impl Default for AppState {
             user_loc: None,
             hydrants: Vec::new(),
             current_hydrant: None,
+            center_needs_update: false,
+            zoom_needs_update: false,
         }
     }
 
@@ -39,10 +153,18 @@ impl AppState {
 
     pub fn set_user_loc(&mut self, user_loc: Location){
         self.user_loc = Some(user_loc);
+        self.center_needs_update = true;
     }
 
     pub fn set_hydrants(&mut self, hydrants: Vec<HydrantWithRoute>){
+        //Mögliche fraben: BLACK, DARK_GRAY, GRAY, LIGHT_GRAY, WHITE, BROWN, DARK_RED, RED, LIGHT_RED, CYAN, MAGENTA, YELLOW, ORANGE, LIGHT_YELLOW, KHAKI, DARK_GREEN, GREEN, LIGHT_GREEN, DARK_BLUE, BLUE, LIGHT_BLUE, PURPLE, GOLD, from_rgb()
+        let available_colors = [Color32::RED, Color32::BLUE, Color32::MAGENTA, Color32::ORANGE, Color32::CYAN, Color32::GREEN];
         self.hydrants = hydrants;
+        self.zoom_needs_update = true;
+
+        for (i, hydrant) in self.hydrants.iter_mut().enumerate() {
+            hydrant.color = available_colors[i % available_colors.len()];
+        }
     }
 
     pub fn set_hydrant(&mut self, hydrant: usize) {
@@ -85,7 +207,8 @@ pub(crate) struct MyEguiApp {
 impl MyEguiApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, state: Arc<Mutex<AppState>>) -> Self {
         let mut map = Map::new(OpenStreetMapConfig::default());
-        Self { state, map }
+        map.add_layer("draw_layer", DrawLayer::new());
+        Self { state, map}
     }
 }
 
@@ -93,9 +216,13 @@ impl eframe::App for MyEguiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
 
-        let (is_loading, show_error_banner, user_loc, hydrants, current_hydrant, error_msg) = {
-            let s = self.state.lock().unwrap();
-            (s.is_loading, s.show_error_banner, s.user_loc, s.hydrants.clone(), s.current_hydrant, s.error_msg.clone())
+        let (is_loading, show_error_banner, user_loc, hydrants, current_hydrant, error_msg, update_center, update_zoom) = {
+            let mut s = self.state.lock().unwrap();
+            let uc = s.center_needs_update;
+            let uz = s.zoom_needs_update;
+            s.center_needs_update = false;
+            s.zoom_needs_update = false;
+            (s.is_loading, s.show_error_banner, s.user_loc, s.hydrants.clone(), s.current_hydrant, s.error_msg.clone(), uc, uz)
         };
 
         if !is_loading && !show_error_banner {
@@ -104,8 +231,12 @@ impl eframe::App for MyEguiApp {
                 ui.heading("Top Panel Zeug");
             });
             egui::SidePanel::right("side_panel").show_inside(ui, |ui| {
+                ui.heading("Hydranten");
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Side Panel Zeug");
+                    for i in 0.. hydrants.len()  {
+                        let hydrant = &hydrants[i];
+                        ui.colored_label(hydrants[i].color, hydrants[i].hydrant.tags.as_ref().expect("Keine Infos zu diesem Hydranten").output());
+                    }
                 });
             });
 
@@ -122,17 +253,33 @@ impl eframe::App for MyEguiApp {
             });
 
             if show_error_banner  {
-                ui.colored_label(egui::Color32::RED, error_msg);
+                ui.colored_label(Color32::RED, error_msg);
             }
 
             if !is_loading && !show_error_banner {
-                ui.add_sized(ui.available_size_before_wrap(), &mut self.map);
-                if let Some(user) = user_loc && hydrants.len() >= 1{
-                    let zoom = calculate_zoom_level(&user, &hydrants[0].hydrant);
-                    self.map.zoom = zoom;
-                    self.map.center.lat = user.latitude;
-                    self.map.center.lon = user.longitude;
+
+
+                if update_center {
+
+                    if let Some(user) = user_loc {
+                        if let Some(layer) = self.map.layer_mut::<DrawLayer>("draw_layer") {
+                            layer.set_user_loc(user);
+                        }
+                        self.map.center.lat = user.latitude;
+                        self.map.center.lon = user.longitude;
+                    }
                 }
+
+                if update_zoom {
+                    if let (Some(user), Some(first_hydrant)) = (user_loc, &hydrants.first()) {
+                        if let Some(layer) = self.map.layer_mut::<DrawLayer>("draw_layer") {
+                            layer.set_hydrants(hydrants.clone());
+                        }
+                        self.map.zoom = calculate_zoom_level(&user, &first_hydrant.hydrant);
+                    }
+                }
+
+                ui.add_sized(ui.available_size_before_wrap(), &mut self.map);
 
             }
         });

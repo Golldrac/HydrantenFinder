@@ -1,3 +1,5 @@
+use eframe::egui;
+use eframe::egui::Color32;
 use serde::{Deserialize, Serialize};
 
 // --- API / Overpass Structs ---
@@ -190,6 +192,8 @@ pub struct HydrantWithRoute {
     pub hydrant: Hydrant,
     /// Die Routendetails vom Benutzer zu diesem Hydranten.
     pub route_details: RouteDetails,
+    ///Farbe des Hydranten in der GUI
+    pub color: Color32,
 
 }
 
@@ -264,6 +268,7 @@ impl HydrantWithRoute {
         HydrantWithRoute {
             hydrant,
             route_details,
+            color: Color32::PLACEHOLDER,
         }
     }
 
