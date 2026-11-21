@@ -1,28 +1,34 @@
 use std::process::exit;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, NaiveDateTime, Utc};
-use geohash::{encode, Coord};
-use mysql::prelude::*;
+use geohash::{Coord, encode};
 use mysql::*;
+use mysql::prelude::*;
 use serde_json;
 
-use crate::models::{CachedRouteItem, Hydrant, HydrantTags, Location, HydrantWithRoute, RouteDetails};
+use crate::models::{
+    CachedRouteItem, Hydrant, HydrantTags, HydrantWithRoute, Location, RouteDetails,
+};
 
-/// Die Verbindungs-URL zur lokalen MySQL-Datenbank.
+/// Verbindungs-URL zur lokalen MySQL-Datenbank.
 const URL: &str = "mysql://root@localhost:3306/hydranten_cache";
 
-/// Globaler Datenbank-Pool, der einmalig beim Start initialisiert wird.
+/// Globaler Datenbank-Pool, der einmalig beim Programmstart initialisiert wird.
 static DB_POOL: OnceLock<Pool> = OnceLock::new();
 
-/// Initialisiert den Datenbank-Pool und erstellt die notwendigen Tabellenstrukturen,
-/// falls diese noch nicht existieren.
+/// Initialisiert den globalen Datenbank-Pool und erstellt bei Bedarf die Tabellen `hydrants` und `route_cache`.
+///
+/// # Returns
+///
+/// `Ok(())` bei erfolgreicher Initialisierung.
 ///
 /// # Errors
-/// Gibt einen Fehler zurück, wenn die Verbindung fehlschlägt oder Tabellen nicht erstellt werden können.
+///
+/// Gibt einen Fehler zurück, wenn keine Verbindung hergestellt werden kann, die Tabellenanlage
+/// fehlschlägt oder der Pool bereits initialisiert wurde.
 pub fn initialize_db() -> Result<()> {
     let pool = Pool::new(URL).context("Verbindung zum Datenbank-Server fehlgeschlagen")?;
     let mut conn = pool.get_conn().context("Fehler beim Abrufen einer Verbindung aus dem Pool")?;
@@ -53,20 +59,35 @@ pub fn initialize_db() -> Result<()> {
     Ok(())
 }
 
-/// Gibt eine Referenz auf den globalen Datenbank-Pool zurück.
+/// Gibt eine statische Referenz auf den globalen Datenbank-Pool zurück.
+///
+/// # Returns
+///
+/// Eine Referenz `&'static Pool` auf den aktiven MySQL-Verbindungspool.
 ///
 /// # Panics
-/// Panikt, wenn der Pool vor dem Zugriff nicht mittels `initialize_db` initialisiert wurde.
+///
+/// Panikt, wenn der Pool vor dem Zugriff nicht über [`initialize_db`] initialisiert wurde.
 pub fn get_pool() -> &'static Pool {
     DB_POOL.get().expect("Datenbank-Pool wurde nicht initialisiert!")
 }
 
-/// Ruft bereits berechnete Hydranten-Rankings für einen bestimmten Standort aus dem Cache ab.
+/// Ruft zwischengespeicherte Hydranten-Routen für einen Standort aus dem Datenbank-Cache ab.
 ///
-/// Berücksichtigt nur Einträge, die nicht älter als 2 Wochen sind.
+/// Kodiert die Position als 8-stelligen GeoHash und verwirft Einträge, die älter als 2 Wochen sind.
+///
+/// # Arguments
+///
+/// * `location` - Der abzufragende Benutzerstandort.
+///
+/// # Returns
+///
+/// Ein `Vec<HydrantWithRoute>` aus dem Cache (leer bei Cache-Miss oder veraltetem Eintrag).
 ///
 /// # Errors
-/// Liefert Fehler bei Datenbankproblemen oder Deserialisierungsfehlern von JSON-Daten.
+///
+/// Gibt einen Fehler zurück, wenn die GeoHash-Kodierung, die Datenbankabfrage oder die
+/// JSON-Deserialisierung fehlschlägt.
 pub fn get_cached_hydrant_routes(location: &Location) -> Result<Vec<HydrantWithRoute>> {
     let coord = Coord {
         x: location.longitude,
@@ -85,17 +106,16 @@ pub fn get_cached_hydrant_routes(location: &Location) -> Result<Vec<HydrantWithR
         Some(data) => data,
         None => {
             println!("[-] Kein Cache-Eintrag für Geohash {} gefunden.", geohash);
-            return Ok(Vec::new())
-        },
-
+            return Ok(Vec::new());
+        }
     };
 
     let now = Utc::now().naive_utc();
+
     if now.signed_duration_since(created_at) > Duration::weeks(2) {
         println!("[!] Cache-Eintrag für Geohash {} ist veraltet.", geohash);
         return Ok(Vec::new());
     }
-
 
     let cached_items: Vec<CachedRouteItem> = serde_json::from_str(&cached_routes_json)?;
     let mut ranked_hydrants = Vec::with_capacity(cached_items.is_empty().then_some(0).unwrap_or(cached_items.len()));
@@ -134,14 +154,32 @@ pub fn get_cached_hydrant_routes(location: &Location) -> Result<Vec<HydrantWithR
     Ok(ranked_hydrants)
 }
 
-/// Speichert eine Liste von gerankten Hydranten im Cache und aktualisiert die Stammdaten.
+/// Speichert berechnete Hydranten-Routen transaktional im Cache und aktualisiert die Stammdaten.
 ///
-/// Nutzt `ON DUPLICATE KEY UPDATE`, um bestehende Hydranten-Informationen zu aktualisieren.
+/// Setzt während des Schreibvorgangs `db_for_db` auf `true` und beendet den Prozess sauber,
+/// falls währenddessen über `r_for_db` ein Abbruchsignal (`Ctrl+C`) eingegangen ist.
+///
+/// # Arguments
+///
+/// * `location` - Der Standort, für den die Routen berechnet wurden.
+/// * `hydrants` - Die sortierte Liste der Hydranten inklusive Routendetails.
+/// * `r_for_db` - Atomares Flag, das anzeigt, ob die Anwendung weiterlaufen soll.
+/// * `db_for_db` - Atomares Flag, das einen laufenden Datenbank-Schreibvorgang signalisiert.
+///
+/// # Returns
+///
+/// `Ok(())` nach erfolgreichem Commit der Transaktion.
 ///
 /// # Errors
-/// Gibt einen Fehler zurück, wenn die Serialisierung fehlschlägt oder die Datenbank nicht erreichbar ist.
-pub fn save_hydrant_routes(location: &Location, hydrants: &[HydrantWithRoute], r_for_db: &Arc<AtomicBool>, db_for_db: &Arc<AtomicBool>) -> Result<()> {
-
+///
+/// Gibt einen Fehler zurück, wenn die JSON-Serialisierung, eine SQL-Anweisung oder der
+/// Transaktions-Commit fehlschlägt.
+pub fn save_hydrant_routes(
+    location: &Location,
+    hydrants: &[HydrantWithRoute],
+    r_for_db: &Arc<AtomicBool>,
+    db_for_db: &Arc<AtomicBool>,
+) -> Result<()> {
     db_for_db.store(true, Ordering::SeqCst);
 
     let mut conn = get_pool().get_conn()?;
@@ -167,10 +205,11 @@ pub fn save_hydrant_routes(location: &Location, hydrants: &[HydrantWithRoute], r
             },
         )?;
 
-        let hydrant_id: i32 = tx.exec_first(
-            "SELECT id FROM hydrants WHERE osm_id = :osm_id",
-            params! { "osm_id" => h.osm_id },
-        )?
+        let hydrant_id: i32 = tx
+            .exec_first(
+                "SELECT id FROM hydrants WHERE osm_id = :osm_id",
+                params! { "osm_id" => h.osm_id },
+            )?
             .context("Fehler beim Abrufen der Hydranten-ID nach dem Insert")?;
 
         cached_route_items.push(CachedRouteItem {

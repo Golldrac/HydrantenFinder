@@ -1,9 +1,9 @@
-use crate::models::{Hydrant, Location};
-use anyhow::Result;
 use std::process::exit;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::Result;
 use dotenvy::dotenv;
 use geo::{Distance, Haversine};
 use geo_types::Point;
@@ -14,31 +14,40 @@ use windows::Devices::Geolocation::{
 use windows::Foundation::TimeSpan;
 use windows_future::IAsyncOperation;
 
-/// Konvertiert Sekunden in die 100-Nanosekunden-Einheit, die für `TimeSpan::Duration` benötigt wird.
-const DURATION_FACTOR: i64 = 10_000_000; // 1 Sekunde = 10 Millionen * 100ns
+use crate::models::{Hydrant, Location};
 
-/// Die maximale Dauer, für die eine gespeicherte Position akzeptiert wird (5 Minuten).
+/// Umrechnungsfaktor von Sekunden in 100-Nanosekunden-Einheiten für `TimeSpan::Duration`.
+const DURATION_FACTOR: i64 = 10_000_000;
+
+/// Maximales Alter einer zwischengespeicherten Windows-Standortposition (5 Minuten).
 const MAX_AGE_DURATION_NANOS: i64 = 5 * 60 * DURATION_FACTOR;
 
-/// Der Timeout für die Positionsanforderung (5 Sekunden).
+/// Timeout für die Windows-Standortabfrage (5 Sekunden).
 const TIMEOUT_DURATION_NANOS: i64 = 5 * DURATION_FACTOR;
-/// Der maximale Abstand in Metern, bei dem ein Hydrant als "erreicht" gilt und keine Routenberechnung nötig ist.
+
+/// Maximaler Abstand in Metern, unterhalb dessen ein Hydrant als unmittelbar erreicht gilt.
 pub const PROXIMITY_THRESHOLD_METERS: f64 = 5.0;
-/// Die Breite der generierten statischen Karte in Pixeln (für Zoom-Berechnung).
+
+/// Referenzbreite der Kartenansicht in Pixeln für die Zoom-Berechnung.
 const MAP_WIDTH_PIXELS: f64 = 800.0;
-/// Der maximale Zoomlevel für die Stadia Maps API.
+
+/// Maximal zulässiger Zoomlevel für die Kartendarstellung.
 const MAX_ZOOM: u8 = 32;
 
 /// Ruft die aktuellen geographischen Koordinaten des Benutzers über die Windows Geolocation API ab.
 ///
-/// Stellt sicher, dass der Standortzugriff gewährt ist und versucht,
-/// eine Position mit einem maximalen Alter von 5 Minuten und einem Timeout von 5 Sekunden zu erhalten.
+/// Fordert die Standortberechtigung an und versucht, eine Position mit hoher Genauigkeit,
+/// einem maximalen Alter von 5 Minuten und einem Timeout von 5 Sekunden zu ermitteln.
+///
+/// # Returns
+///
+/// Die ermittelte Benutzerposition als [`Location`].
 ///
 /// # Errors
+///
 /// Gibt einen Fehler zurück, wenn:
-/// * Der Standortzugriff in den Windows-Einstellungen verweigert wurde.
-/// * Die Windows API einen Fehler zurückgibt (z.B. Timeout oder interner Fehler).
-
+/// * Der Standortzugriff in den Windows-Einstellungen verweigert wurde oder unspezifiziert ist.
+/// * Die Windows Geolocation API einen Fehler oder ein Timeout meldet.
 pub async fn get_user_coordinates() -> Result<Location> {
     let access_status = Geolocator::RequestAccessAsync()?.await?;
 
@@ -74,21 +83,19 @@ pub async fn get_user_coordinates() -> Result<Location> {
     }
 }
 
-/// Berechnet einen geeigneten Zoomlevel für die statische Karte,
-/// sodass beide Standorte auf die Karte passen.
+/// Berechnet einen geeigneten Karten-Zoomlevel, sodass beide Positionen sichtbar sind.
 ///
-/// Nutzt eine Näherungsformel, die auf der horizontalen Distanz zwischen den Punkten basiert.
+/// Nutzt die Haversine-Distanz zwischen beiden Punkten sowie eine Mercator-Näherungsformel.
 ///
 /// # Arguments
 ///
-/// * `loc1` - Die erste Position (z.B. Benutzer).
-/// * `loc2` - Die zweite Position (z.B. Hydrant).
+/// * `loc1` - Die erste Position (z. B. Benutzerstandort).
+/// * `loc2` - Die zweite Position (z. B. Zielhydrant).
 ///
 /// # Returns
 ///
-/// Der berechnete Zoomlevel als `u32`, begrenzt auf $0$ bis $18$.
+/// Der berechnete Zoomlevel als `u8`, begrenzt auf den Bereich `0` bis [`MAX_ZOOM`].
 pub fn calculate_zoom_level(loc1: &Location, loc2: &Hydrant) -> u8 {
-
     let p1 = Point::new(loc1.longitude, loc1.latitude);
     let p2 = Point::new(loc2.longitude, loc2.latitude);
     let distance_m = Haversine.distance(p1, p2);
@@ -104,16 +111,31 @@ pub fn calculate_zoom_level(loc1: &Location, loc2: &Hydrant) -> u8 {
     let earth_circumference = 40_075_016.7;
     let zoom_f64 = (earth_circumference * mid_lat_rad.cos() / (256.0 * meters_per_pixel)).log2() * 1.1;
 
-    let final_zoom = zoom_f64.floor() as u8;
+    let final_zoom = (zoom_f64.floor() - 1.0) as u8;
 
     final_zoom.clamp(0, MAX_ZOOM)
 }
 
-/// Initialisiert die Anwendung (Umgebungsvariablen und Terminal-Einstellungen)
-pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
+/// Initialisiert Umgebungsvariablen, Datenbank-Pool, HTTP-Client und Signal-Handler.
+///
+/// Registriert einen `Ctrl+C`-Handler, der das Beenden der Anwendung verzögert,
+/// solange ein Datenbank-Schreibvorgang (`in_db`) aktiv ist.
+///
+/// # Returns
+///
+/// Ein Tupel aus konfiguriertem [`Client`], dem Laufzeit-Flag (`running`) und dem
+/// Datenbank-Aktivitäts-Flag (`in_db`).
+///
+/// # Errors
+///
+/// Gibt einen Fehler zurück, wenn die Datenbankinitialisierung oder der Bau des HTTP-Clients fehlschlägt.
+///
+/// # Panics
+///
+/// Panikt, wenn der `Ctrl+C`-Signal-Handler nicht registriert werden kann.
+pub fn init_app() -> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
     // 1. .env laden (Plattformunabhängig)
     dotenv().ok();
-    setup_terminal();
     crate::database::initialize_db()?;
 
     let client = reqwest::Client::builder()
@@ -127,7 +149,6 @@ pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
     let r_sig = Arc::clone(&running);
     let db_sig = Arc::clone(&in_db);
 
-
     ctrlc::set_handler(move || {
         if db_sig.load(Ordering::SeqCst) {
             println!("[+] Datenbank aktiv. Beende nach Abschluss...");
@@ -135,33 +156,8 @@ pub fn init_app()-> Result<(Client, Arc<AtomicBool>, Arc<AtomicBool>)> {
         } else {
             exit(0);
         }
-    }).expect("Error setting handler");
+    })
+        .expect("Error setting handler");
 
     Ok((client, running, in_db))
-}
-
-#[cfg(windows)]
-fn setup_terminal() {
-    unsafe {
-        use windows_sys::Win32::System::Console::{
-            GetStdHandle, GetConsoleMode, SetConsoleMode,
-            SetConsoleOutputCP, SetConsoleCP,
-            ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE
-        };
-
-        SetConsoleOutputCP(65001);
-        SetConsoleCP(65001);
-
-        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        let mut mode = 0;
-        if GetConsoleMode(handle, &mut mode) != 0 {
-            let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn setup_terminal() {
-    // Auf Linux/macOS ist in der Regel nichts zu tun,
-    // da UTF-8 und ANSI standardmäßig aktiv sind.
 }

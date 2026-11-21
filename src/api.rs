@@ -2,6 +2,7 @@ use std::cmp::min;
 use std::env;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 use geo::{Distance, Haversine, Point};
 use geo_types::Coord;
@@ -11,21 +12,24 @@ use rand::RngExt;
 use reqwest::{self, Client};
 use serde_json;
 use tokio::task;
-use tokio::time::{self, sleep, Duration};
+use tokio::time::{self, Duration, sleep};
 
-use crate::utils::PROXIMITY_THRESHOLD_METERS;
 use crate::models::{
-    Hydrant, Location, LocationResponse, MapLine, MapMarker, MapRequest, ORSResponse, OSRMResponse,
-    HydrantWithRoute, RouteDetails,
+    Hydrant, HydrantWithRoute, Location, LocationResponse, ORSResponse, OSRMResponse,
+    RouteDetails,
 };
+use crate::utils::PROXIMITY_THRESHOLD_METERS;
 
-/// Der maximale Suchradius in Metern für Hydranten.
+/// Maximaler Suchradius in Metern für die Hydrantensuche über Overpass.
 const MAX_RADIUS: u32 = 1_500;
-/// Die Genauigkeit, mit der Polylines kodiert werden sollen.
+
+/// Genauigkeit (Dezimalstellen), mit der Polylines kodiert und dekodiert werden.
 pub const POLYLINE_PRECISION: u32 = 6;
-/// Die Standardanzahl an zurückzugebenden Hydranten, falls kein Limit angegeben wurde.
+
+/// Standardanzahl zurückzugebender Hydranten, falls kein Limit angegeben wurde.
 const DEFAULT_HYDRANT_LIMIT: usize = 5;
 
+/// Liste alternativer Overpass-API-Endpoints für automatisches Failover.
 const OVERPASS_ENDPOINTS: &[&str] = &[
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -36,22 +40,23 @@ const OVERPASS_ENDPOINTS: &[&str] = &[
 
 /// Ruft Hydranten im angegebenen Radius um die übergebene Position von der Overpass API ab.
 ///
-/// Führt interne Retries bei transienten Fehlern durch. Verdoppelt den Suchradius (`initial_radius_m`)
-/// bei jedem erfolglosen Versuch, bis mindestens 5 Hydranten gefunden oder der `MAX_RADIUS` erreicht wird.
+/// Wechselt bei Fehlern durch die konfigurierten [`OVERPASS_ENDPOINTS`] und führt interne Retries durch.
+/// Verdoppelt den Suchradius bei weniger als 5 Treffern schrittweise bis maximal [`MAX_RADIUS`].
 ///
 /// # Arguments
 ///
-/// * `location` - Die Startposition.
-/// * `initial_radius_m` - Der anfängliche Suchradius in Metern (z.B. 500m).
-/// * `client` - Ein geteilter reqwest Client.
+/// * `location` - Die Startposition für die Umkreissuche.
+/// * `initial_radius_m` - Der anfängliche Suchradius in Metern (z. B. `500`).
+/// * `client` - Ein geteilter HTTP-Client.
 ///
 /// # Returns
 ///
-/// Eine `Vec<Hydrant>` der gefundenen Hydranten.
+/// Ein `Vec<Hydrant>` mit allen im finalen Radius gefundenen Hydranten.
 ///
 /// # Errors
 ///
-/// Gibt einen Fehler zurück, wenn die Overpass API nach allen Retries einen nicht erfolgreichen Statuscode zurückgibt.
+/// Gibt einen Fehler zurück, wenn alle Overpass-Endpoints fehlschlagen oder die Antwort
+/// nicht als JSON deserialisiert werden kann.
 pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &Client) -> Result<Vec<Hydrant>> {
     let lat = location.latitude;
     let lon = location.longitude;
@@ -121,28 +126,28 @@ pub async fn find_hydrants(location: &Location, initial_radius_m: u32, client: &
     }
 }
 
-/// Ruft die nächstgelegenen Hydranten (Luftlinie) ab.
+/// Ruft die nach Luftlinie nächstgelegenen Hydranten ab.
 ///
-/// Die Hydranten werden zuerst über `find_hydrants` gesucht (aktuell mit festem Startradius von 500m),
-/// dann nach Haversine-Distanz sortiert und auf die gewünschte Anzahl begrenzt.
+/// Sucht Hydranten über [`find_hydrants`] mit einem Startradius von 500 Metern,
+/// sortiert sie aufsteigend nach Haversine-Distanz und begrenzt das Ergebnis.
 ///
 /// # Arguments
 ///
 /// * `location` - Die Startposition des Benutzers.
-/// * `amount` - Die maximale Anzahl der zurückzugebenden Hydranten (Standard: 5).
-/// * `client` - Ein geteilter reqwest Client.
+/// * `amount` - Optionale maximale Anzahl zurückzugebender Hydranten (Standard: [`DEFAULT_HYDRANT_LIMIT`]).
+/// * `client` - Ein geteilter HTTP-Client.
 ///
 /// # Returns
 ///
-/// Eine `Vec<Hydrant>` der nächstgelegenen Hydranten, sortiert nach Luftlinie.
+/// Ein nach Luftlinie sortierter `Vec<Hydrant>`.
 ///
 /// # Errors
 ///
-/// Gibt einen Fehler zurück, wenn keine Hydranten im Suchradius gefunden wurden.
+/// Gibt einen Fehler zurück, wenn der Overpass-Abruf fehlschlägt oder keine Hydranten gefunden wurden.
 pub async fn get_nearest_hydrants(
     location: &Location,
     amount: Option<usize>,
-    client: &Client
+    client: &Client,
 ) -> Result<Vec<Hydrant>> {
     let radius_m = 500;
 
@@ -182,20 +187,25 @@ pub async fn get_nearest_hydrants(
 
 // --- Routenberechnung (OSRM / ORS Fallback) ---
 
-/// Berechnet die Route zwischen Start und Ziel mithilfe der OSRM (Open Source Routing Machine) API.
+/// Berechnet eine Fußgängerroute zwischen Start und Ziel mithilfe der OSRM API.
 ///
-/// Führt interne Retries bei transienten Fehlern durch. Bei permanenten Fehlern,
-/// HTTP-Fehler-Statuscodes oder ungültiger/0m Route wird automatisch auf `fetch_route_ors` zurückgefallen.
+/// Führt bei transienten Fehlern Retries durch und wechselt bei Netzwerkfehlern,
+/// ungültigen HTTP-Statuscodes, leeren Routen oder 0m-Distanzen automatisch auf [`fetch_route_ors`].
 ///
 /// # Arguments
 ///
-/// * `client` - Ein geteilter reqwest Client.
+/// * `client` - Ein geteilter HTTP-Client.
 /// * `start` - Die Startposition.
-/// * `destination` - Die Zielposition (Hydrant).
+/// * `destination` - Der Zielhydrant.
 ///
 /// # Returns
 ///
-/// Die `RouteDetails` der berechneten Route, oder ein Fallback auf ORS.
+/// Die berechneten [`RouteDetails`] von OSRM oder dem ORS-Fallback.
+///
+/// # Errors
+///
+/// Gibt einen Fehler zurück, wenn die OSRM-Antwort nicht geparst werden kann oder
+/// der Fallback auf [`fetch_route_ors`] fehlschlägt.
 pub async fn fetch_route_osrm(
     client: &Client,
     start: &Location,
@@ -219,7 +229,7 @@ pub async fn fetch_route_osrm(
                     .map_err(anyhow::Error::from)
             }
         },
-        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
+        2,
         Duration::from_secs(2),
     )
         .await;
@@ -228,7 +238,6 @@ pub async fn fetch_route_osrm(
         Ok(r) => r,
         Err(e) => {
             eprintln!("[!] OSRM-Netzwerkfehler (nach Retries): {}. Versuche ORS...", e);
-            // Fallback auf ORS
             return fetch_route_ors(client, start, destination).await;
         }
     };
@@ -238,7 +247,6 @@ pub async fn fetch_route_osrm(
             "[!] OSRM-API-Fehler (Status: {}). Versuche ORS...",
             response.status()
         );
-        // Fallback auf ORS
         return fetch_route_ors(client, start, destination).await;
     }
 
@@ -247,7 +255,6 @@ pub async fn fetch_route_osrm(
     if let Some(route) = response_body.routes.into_iter().next() {
         if let Some(leg) = route.legs.into_iter().next() {
             if leg.distance == 0.0 {
-                // 0m-Route Fallback
                 eprintln!("[!] OSRM lieferte 0m-Route. Versuche ORS...");
                 return fetch_route_ors(client, start, destination).await;
             }
@@ -258,35 +265,37 @@ pub async fn fetch_route_osrm(
         }
     }
 
-    // Fallback, wenn keine Route im Body gefunden wurde
-    eprintln!("[!] OSRM lieferte keine Route im Body. Versuche ORS...",);
+    eprintln!("[!] OSRM lieferte keine Route im Body. Versuche ORS...");
     fetch_route_ors(client, start, destination).await
 }
 
-/// Berechnet die Route zwischen Start und Ziel mithilfe der OpenRouteService (ORS) API.
+/// Berechnet eine Fußgängerroute zwischen Start und Ziel mithilfe der OpenRouteService (ORS) API.
 ///
-/// ORS dient als Fallback für OSRM und erfordert einen API-Schlüssel (`ORS_API_KEY`).
-/// Führt interne Retries bei transienten Fehlern durch. Meldet ORS eine 0m-Route,
-/// wird die Haversine-Distanz (Luftlinie) als Fallback zurückgegeben (falls > 10m).
-/// Wichtig: Bei Fallback auf Luftlinie wird `geometry_polyline` leer zurückgegeben.
+/// Dient als Fallback für [`fetch_route_osrm`] und benötigt die Umgebungsvariable `ORS_API_KEY`.
+/// Meldet ORS eine 0m-Route bei einer Luftlinie von über 5 Metern, wird die Haversine-Distanz
+/// mit leerer Polyline zurückgegeben.
 ///
 /// # Arguments
 ///
-/// * `client` - Ein geteilter reqwest Client.
+/// * `client` - Ein geteilter HTTP-Client.
 /// * `start` - Die Startposition.
-/// * `destination` - Die Zielposition (Hydrant).
+/// * `destination` - Der Zielhydrant.
+///
+/// # Returns
+///
+/// Die berechneten [`RouteDetails`] inklusive Polyline6-kodierter Geometrie.
 ///
 /// # Errors
 ///
-/// Gibt einen Fehler zurück, wenn die `ORS_API_KEY` Umgebungsvariable fehlt oder
-/// die API nach allen Retries einen Fehlerstatus zurückgibt.
+/// Gibt einen Fehler zurück, wenn `ORS_API_KEY` fehlt, die API nach Retries einen Fehlerstatus
+/// liefert, die JSON-Antwort ungültig ist oder kein Routen-Feature enthalten ist.
 pub async fn fetch_route_ors(
     client: &Client,
     start: &Location,
     destination: &Hydrant,
 ) -> Result<RouteDetails> {
-    let api_key =
-        env::var("ORS_API_KEY").context("[X] ORS_API_KEY Umgebungsvariable muss gesetzt sein. Routing nicht möglich.")?;
+    let api_key = env::var("ORS_API_KEY")
+        .context("[X] ORS_API_KEY Umgebungsvariable muss gesetzt sein. Routing nicht möglich.")?;
 
     let url = format!(
         "https://api.openrouteservice.org/v2/directions/foot-walking?api_key={}&start={},{}&end={},{}&snapping=any",
@@ -306,12 +315,11 @@ pub async fn fetch_route_ors(
                     .map_err(anyhow::Error::from)
             }
         },
-        2, // Max. 2 Versuche (1. Versuch + 1 Retry)
+        2,
         Duration::from_secs(2),
     )
         .await;
 
-    // Nun behandeln wir das finale Ergebnis:
     let response = match response {
         Ok(r) => r,
         Err(e) => {
@@ -352,7 +360,6 @@ pub async fn fetch_route_ors(
 
         let geometry_polyline = polyline::encode_coordinates(geo_coords, POLYLINE_PRECISION)?;
 
-        // Fallback-Logik, wenn ORS 0m meldet
         if route_distance == 0.0 {
             let start_point = Point::new(start.longitude, start.latitude);
             let dest_point = Point::new(destination.longitude, destination.latitude);
@@ -381,35 +388,34 @@ pub async fn fetch_route_ors(
 
 // --- Ranking / Routen-Aggregator ---
 
-/// Ermittelt den am besten bewerteten Hydranten unter den Kandidaten.
+/// Berechnet parallel die Fußweg-Routen zu allen Hydranten-Kandidaten und sortiert sie nach Distanz.
 ///
-/// Parallelisierung: Die Routenberechnung für jeden Kandidaten erfolgt asynchron und parallel
-/// mithilfe von `tokio::task::spawn`.
-///
-/// Optimierung: Wenn der Hydrant, der per Luftlinie am nächsten liegt,
-/// bereits innerhalb des `PROXIMITY_THRESHOLD_METERS` (5m) liegt, wird sofort diese Position
-/// ohne Routenberechnung als gültiger, gerankter Hydrant hinzugefügt (diese wird nicht von der Task-Timeout-Logik beeinflusst).
-///
-/// Timeout: Wenn die Berechnung aller Routen länger als 5 Sekunden dauert, wird mit den bis dahin
-/// gefundenen Routen fortgefahren, sofern mindestens 3 Ergebnisse vorliegen. Andernfalls wird ein Fehler zurückgegeben.
+/// Kandidaten innerhalb von [`PROXIMITY_THRESHOLD_METERS`] werden direkt ohne API-Anfrage
+/// mit Luftliniendistanz übernommen. Alle übrigen Routen werden parallel in Tokio-Tasks mit einem
+/// Gesamt-Timeout von 5 Sekunden berechnet.
 ///
 /// # Arguments
 ///
 /// * `user_location` - Die Startposition des Benutzers.
-/// * `candidate_hydrants` - Eine Liste von Hydranten, die in Betracht gezogen werden sollen (typischerweise die nach Luftlinie nächsten).
-/// * `client` - Ein geteilter reqwest Client.
+/// * `candidate_hydrants` - Liste der zu bewertenden Hydranten-Kandidaten.
+/// * `client` - Ein geteilter HTTP-Client.
 ///
 /// # Returns
 ///
-/// Eine sortierte `Vec<HydrantWithRoute>` mit dem besten (kürzester Weg) an erster Stelle.
+/// Ein nach Routendistanz aufsteigend sortierter `Vec<HydrantWithRoute>`.
 ///
 /// # Errors
 ///
-/// Gibt einen Fehler zurück, wenn keine gültige Route zu einem der Hydranten gefunden werden konnte oder das Timeout mit zu wenigen Ergebnissen ($<3$) überschritten wird.
+/// Gibt einen Fehler zurück, wenn keine Kandidaten übergeben wurden, das 5-Sekunden-Timeout
+/// mit weniger als 3 Ergebnissen abläuft, ein Worker-Task abbricht oder keine Route ermittelt werden konnte.
+///
+/// # Panics
+///
+/// Panikt, wenn der interne Ergebnis-`Mutex` durch einen abgestürzten Task vergiftet (poisoned) wurde.
 pub async fn get_closest_by_route(
     user_location: &Location,
     candidate_hydrants: &[Hydrant],
-    client: &Client
+    client: &Client,
 ) -> Result<Vec<HydrantWithRoute>> {
     if candidate_hydrants.is_empty() {
         anyhow::bail!("[X] Keine Hydranten-Kandidaten zur Routenberechnung vorhanden.");
@@ -427,14 +433,11 @@ pub async fn get_closest_by_route(
     let all_ranked_hydrants_arc: Arc<Mutex<Vec<HydrantWithRoute>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut join_handles = Vec::new();
-
     let user_location_owned = user_location.clone();
 
     for hydrant in candidate_hydrants {
         let pb_clone = pb.clone();
-
         let hydrant_point = Point::new(hydrant.longitude, hydrant.latitude);
-
         let haversine_dist = Haversine.distance(user_location_point, hydrant_point);
 
         if haversine_dist <= PROXIMITY_THRESHOLD_METERS {
@@ -446,7 +449,8 @@ pub async fn get_closest_by_route(
                 },
             );
 
-            all_ranked_hydrants_arc.lock()
+            all_ranked_hydrants_arc
+                .lock()
                 .expect("Mutex der Ergebnisse ist vergiftet (Poisoned). Ein anderer Thread ist abgestürzt.")
                 .push(candidate);
             pb_clone.inc(1);
@@ -481,31 +485,39 @@ pub async fn get_closest_by_route(
             handle.await?;
         }
         Ok(()) as Result<()>
-    }).await {
+    })
+        .await
+    {
         Err(e) => {
-            pb.println(format!("[!] Timeout nach {}s. Routenberechnung nicht komplett.", timeout_duration.as_secs()));
-            let num_results = all_ranked_hydrants_arc.lock()
+            pb.println(format!(
+                "[!] Timeout nach {}s. Routenberechnung nicht komplett.",
+                timeout_duration.as_secs()
+            ));
+            let num_results = all_ranked_hydrants_arc
+                .lock()
                 .expect("Mutex der Ranglisten-Hydranten ist vergiftet beim Abrufen der Anzahl (len).")
                 .len();
 
             if num_results < 3 {
                 pb.finish();
-                return Err(anyhow::anyhow!("Route-Berechnung konnte nicht rechtzeitig mindestens 3 Hydranten liefern (nur {})", num_results).context(e));
+                return Err(anyhow::anyhow!(
+                    "Route-Berechnung konnte nicht rechtzeitig mindestens 3 Hydranten liefern (nur {})",
+                    num_results
+                )
+                    .context(e));
             }
-
         }
         Ok(Err(e)) => {
             pb.finish();
             return Err(e);
         }
-        Ok(Ok(_)) => {
-
-        }
+        Ok(Ok(_)) => {}
     };
 
     pb.finish();
 
-    let mut sorted_hydrants = all_ranked_hydrants_arc.lock()
+    let mut sorted_hydrants = all_ranked_hydrants_arc
+        .lock()
         .expect("Mutex der Ranglisten-Hydranten ist vergiftet beim Entleeren (drain) der Ergebnisse.")
         .drain(..)
         .collect::<Vec<HydrantWithRoute>>();
@@ -514,28 +526,35 @@ pub async fn get_closest_by_route(
         anyhow::bail!("[X] Keine Routen zu Hydranten gefunden, auch nicht per Fallback.");
     }
 
-    sorted_hydrants.sort_by(|a, b| a.route_details.distance_meters.partial_cmp(&b.route_details.distance_meters).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_hydrants.sort_by(|a, b| {
+        a.route_details
+            .distance_meters
+            .partial_cmp(&b.route_details.distance_meters)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(sorted_hydrants)
 }
 
 // --- Hilfsfunktionen (Retry) ---
 
-/// Führt die übergebene asynchrone Funktion bis zu `max_retries` Mal aus,
-/// wenn ein transienter Fehler auftritt.
+/// Führt eine asynchrone Operation bei transienten Fehlern bis zu `max_retries` Mal aus.
 ///
-/// Transiente Fehler sind: HTTP 5xx Statuscodes, HTTP 429 (Too Many Requests),
-/// Netzwerk-Timeouts und Verbindungsfehler.
+/// Nutzt Exponential Backoff mit zufälligem Jitter (`0..500 ms`) zwischen den Wiederholungen.
 ///
 /// # Arguments
 ///
-/// * `f` - Die asynchrone Funktion, die ausgeführt werden soll.
-/// * `max_retries` - Die maximale Anzahl der Versuche (1. Versuch + N Retries).
-/// * `base_delay` - Die Basis-Wartezeit zwischen den Versuchen, die exponentiell erhöht wird (Exponential Backoff).
+/// * `f` - Closure, die das auszuführende Future erzeugt.
+/// * `max_retries` - Maximale Gesamtanzahl an Versuchen.
+/// * `base_delay` - Basis-Wartezeit für den Exponential Backoff.
 ///
 /// # Returns
 ///
-/// Das Ergebnis von `f`, oder ein Fehler (`anyhow::Error`), wenn alle Versuche fehlschlagen.
+/// Das erfolgreiche Ergebnis `T` der ausgeführten Operation.
+///
+/// # Errors
+///
+/// Gibt einen Fehler zurück, wenn ein permanenter Fehler auftritt oder `max_retries` erreicht wurde.
 pub async fn retry_on_failure<T, F, Fut>(
     f: F,
     max_retries: u32,
@@ -579,27 +598,28 @@ where
     }
 }
 
-/// Überprüft, ob ein `anyhow::Error` einen transienten Fehler umschließt,
-/// der durch einen Retry behoben werden könnte.
+/// Prüft, ob ein [`anyhow::Error`] einen transienten HTTP- oder Netzwerkfehler umschließt.
 ///
-/// Transiente Fehler: HTTP 5xx, HTTP 429, Timeout, Verbindungsfehler.
+/// Als transient gelten HTTP-5xx-Fehler, HTTP 429 (`Too Many Requests`), HTTP 408 (`Request Timeout`)
+/// sowie Verbindungs- und Timeout-Fehler.
 ///
 /// # Arguments
 ///
-/// * `e` - Der `anyhow::Error`, der geprüft werden soll.
+/// * `e` - Der zu prüfende Fehler.
 ///
 /// # Returns
 ///
-/// `true`, wenn der Fehler transient ist, andernfalls `false`.
+/// `true`, wenn ein erneuter Versuch sinnvoll ist, andernfalls `false`.
 fn is_transient_error(e: &anyhow::Error) -> bool {
     if let Some(reqwest_error) = e.downcast_ref::<reqwest::Error>() {
         if let Some(status) = reqwest_error.status() {
-            if status ==  reqwest::StatusCode::GATEWAY_TIMEOUT ||
-                status == reqwest::StatusCode::SERVICE_UNAVAILABLE ||
-                status == reqwest::StatusCode::TOO_MANY_REQUESTS ||
-                status == reqwest::StatusCode::INTERNAL_SERVER_ERROR ||
-                status == reqwest::StatusCode::REQUEST_TIMEOUT ||
-                status.is_server_error() {
+            if status == reqwest::StatusCode::GATEWAY_TIMEOUT
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status.is_server_error()
+            {
                 return true;
             }
         }
