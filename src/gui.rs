@@ -329,7 +329,7 @@ impl MyEguiApp {
 }
 
 impl eframe::App for MyEguiApp {
-    /// Rendert die gesamte Benutzeroberfläche pro Frame (Top-Panel, Seitenleiste und Karte).
+    /// Rendert die gesamte Benutzeroberfläche pro Frame (Seitenleiste und Karte).
     ///
     /// # Arguments
     ///
@@ -360,10 +360,6 @@ impl eframe::App for MyEguiApp {
         };
 
         if !is_loading && !show_error_banner {
-            egui::TopBottomPanel::top("top_panel").show_inside(ui, |ui| {
-                //TODO
-                ui.heading("Top Panel Zeug");
-            });
             egui::SidePanel::right("side_panel")
                 .default_size(350.0)
                 .show_inside(ui, |ui| {
